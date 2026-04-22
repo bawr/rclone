@@ -621,6 +621,47 @@ func TestOnFinishDataRace(t *testing.T) {
 	}
 }
 
+func TestJobsWaitForJobs(t *testing.T) {
+	jobID.Store(0)
+	jobs := newJobs()
+	block := make(chan struct{})
+	_, _, err := jobs.NewJob(context.Background(), func(ctx context.Context, in rc.Params) (rc.Params, error) {
+		<-block
+		return nil, nil
+	}, rc.Params{"_async": true})
+	require.NoError(t, err)
+
+	waitErr := make(chan error, 1)
+	go func() {
+		waitErr <- jobs.WaitForJobs(context.Background())
+	}()
+
+	select {
+	case err := <-waitErr:
+		t.Fatalf("WaitForJobs returned before the job finished: %v", err)
+	case <-time.After(50 * time.Millisecond):
+	}
+
+	close(block)
+	require.NoError(t, <-waitErr)
+}
+
+func TestJobsWaitForJobsCanceled(t *testing.T) {
+	jobID.Store(0)
+	jobs := newJobs()
+	block := make(chan struct{})
+	_, _, err := jobs.NewJob(context.Background(), func(ctx context.Context, in rc.Params) (rc.Params, error) {
+		<-block
+		return nil, nil
+	}, rc.Params{"_async": true})
+	require.NoError(t, err)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	assert.ErrorIs(t, jobs.WaitForJobs(ctx), context.Canceled)
+	close(block)
+}
+
 // Register some test rc calls
 func init() {
 	rc.Add(rc.Call{

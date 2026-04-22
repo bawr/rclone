@@ -207,6 +207,23 @@ func (jobs *Jobs) Stats() (running []int64, finished []int64) {
 	return running, finished
 }
 
+// WaitForJobs waits until there are no running jobs left or the context is canceled.
+func (jobs *Jobs) WaitForJobs(ctx context.Context) error {
+	ticker := time.NewTicker(100 * time.Millisecond)
+	defer ticker.Stop()
+	for {
+		running, _ := jobs.Stats()
+		if len(running) == 0 {
+			return nil
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-ticker.C:
+		}
+	}
+}
+
 // Get a job with a given ID or nil if it doesn't exist
 func (jobs *Jobs) Get(ID int64) *Job {
 	jobs.mu.RLock()
@@ -378,6 +395,11 @@ func NewJob(ctx context.Context, fn rc.Func, in rc.Params) (job *Job, out rc.Par
 // optional async preflight before returning a jobid.
 func NewCallJob(ctx context.Context, call *rc.Call, in rc.Params) (job *Job, out rc.Params, err error) {
 	return running.newJob(ctx, call.Fn, call.JobPreflight, in)
+}
+
+// WaitForJobs waits until all the global running jobs have finished or the context is canceled.
+func WaitForJobs(ctx context.Context) error {
+	return running.WaitForJobs(ctx)
 }
 
 // OnFinish adds listener to jobid that will be triggered when job is finished.

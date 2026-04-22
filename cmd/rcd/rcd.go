@@ -7,6 +7,7 @@ import (
 
 	"github.com/rclone/rclone/cmd"
 	"github.com/rclone/rclone/fs"
+	"github.com/rclone/rclone/fs/config/flags"
 	"github.com/rclone/rclone/fs/rc"
 	"github.com/rclone/rclone/fs/rc/rcflags"
 	"github.com/rclone/rclone/fs/rc/rcserver"
@@ -15,8 +16,12 @@ import (
 	"github.com/spf13/cobra"
 )
 
+var subprocess bool
+
 func init() {
 	cmd.Root.AddCommand(commandDefinition)
+	cmdFlags := commandDefinition.Flags()
+	flags.BoolVarP(cmdFlags, &subprocess, "rc-subprocess", "", false, "In subprocess mode, stop accepting new work when the original parent exits, then wait for queued jobs to finish", "")
 }
 
 var commandDefinition = &cobra.Command{
@@ -60,6 +65,22 @@ See the [rc documentation](/rc/) for more info on the rc flags.
 		// Notify stopping on exit
 		defer systemd.Notify()()
 
+		var subprocessController *subprocessController
+		if subprocess {
+			subprocessController, err = newSubprocessController()
+			if err != nil {
+				fs.Fatalf(nil, "Failed to start subprocess mode: %v", err)
+			}
+			subprocessController.Start(s)
+			defer subprocessController.Stop()
+		}
+
 		s.Wait()
+		if subprocessController != nil {
+			err = subprocessController.WaitForJobs(context.Background())
+			if err != nil {
+				fs.Fatalf(nil, "Failed while waiting for queued jobs: %v", err)
+			}
+		}
 	},
 }
