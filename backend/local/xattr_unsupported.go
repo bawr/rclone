@@ -5,8 +5,6 @@
 package local
 
 import (
-	"os"
-
 	"github.com/rclone/rclone/fs"
 	"github.com/rclone/rclone/fs/hash"
 )
@@ -22,10 +20,6 @@ func (o *Object) getXattr() (metadata fs.Metadata, err error) {
 
 // setXattr sets the metadata on the file Xattrs
 func (o *Object) setXattr(metadata fs.Metadata) (err error) {
-	return nil
-}
-
-func (o *Object) setXattrWithFD(fd *os.File, metadata fs.Metadata) (err error) {
 	return nil
 }
 
