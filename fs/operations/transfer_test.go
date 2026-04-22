@@ -251,6 +251,29 @@ func TestCopyUsesRetainedTransferForVerify(t *testing.T) {
 	require.NoError(t, newDst.Remove(ctx))
 }
 
+func TestMoveClosesTransferBeforeServerSideMove(t *testing.T) {
+	ctx := context.Background()
+	f, err := mockfs.NewFs(ctx, "mock", "", nil)
+	require.NoError(t, err)
+	base := mockobject.New("file.txt").WithContent([]byte("hello world"), mockobject.SeekModeRegular)
+	base.SetFs(f)
+	src := &transferTestObject{
+		Object: base,
+	}
+	f.Features().Move = func(ctx context.Context, srcObj fs.Object, remote string) (fs.Object, error) {
+		assert.Equal(t, 1, src.closeCalls)
+		moved := mockobject.New(remote).WithContent([]byte("hello world"), mockobject.SeekModeRegular)
+		moved.SetFs(f)
+		return moved, nil
+	}
+
+	newDst, err := Move(ctx, f, nil, "moved.txt", src)
+	require.NoError(t, err)
+	require.NotNil(t, newDst)
+	assert.Equal(t, "moved.txt", newDst.Remote())
+	assert.Equal(t, 1, src.closeCalls)
+}
+
 func TestCopyMultiThreadUsesSingleTransferHandle(t *testing.T) {
 	ctx, ci := fs.AddConfig(context.Background())
 	root := t.TempDir()
