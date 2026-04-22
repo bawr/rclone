@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"sort"
+	"strings"
 	"testing"
 	"time"
 
@@ -249,6 +250,53 @@ func TestHashOnUpdate(t *testing.T) {
 	md5, err = o.Hash(ctx, hash.MD5)
 	require.NoError(t, err)
 	assert.Equal(t, "45685e95985e20822fb2538a522a5ccf", md5)
+}
+
+func TestHashXattrCache(t *testing.T) {
+	if !xattrSupported {
+		t.Skip()
+	}
+
+	ctx := context.Background()
+	r := fstest.NewRun(t)
+	const filePath = "file.txt"
+	const newContents = "changed contents"
+	when := fstest.Time("2001-02-03T04:05:06.123456789Z")
+	r.WriteFile(filePath, "content", when)
+	f := r.Flocal.(*Fs)
+	f.opt.XattrHashes = true
+
+	obj, err := f.NewObject(ctx, filePath)
+	require.NoError(t, err)
+	o := obj.(*Object)
+	oldSize := o.Size()
+	fakeMD5 := strings.Repeat("a", hash.Width(hash.MD5, false))
+	require.NoError(t, o.setCachedHashes(map[hash.Type]string{hash.MD5: fakeMD5}))
+
+	cachedObj, err := f.NewObject(ctx, filePath)
+	require.NoError(t, err)
+	md5, err := cachedObj.Hash(ctx, hash.MD5)
+	require.NoError(t, err)
+	assert.Equal(t, fakeMD5, md5)
+
+	r.WriteFile(filePath, newContents, when)
+
+	staleObj, err := f.NewObject(ctx, filePath)
+	require.NoError(t, err)
+	staleLocal := staleObj.(*Object)
+	staleLocal.fs.objectMetaMu.Lock()
+	staleLocal.size = oldSize
+	staleLocal.fs.objectMetaMu.Unlock()
+	require.NoError(t, staleLocal.setCachedHashes(map[hash.Type]string{hash.MD5: fakeMD5}))
+
+	freshObj, err := f.NewObject(ctx, filePath)
+	require.NoError(t, err)
+	md5, err = freshObj.Hash(ctx, hash.MD5)
+	require.NoError(t, err)
+	expected, err := hash.StreamTypes(strings.NewReader(newContents), hash.NewHashSet(hash.MD5))
+	require.NoError(t, err)
+	assert.Equal(t, expected[hash.MD5], md5)
+	assert.NotEqual(t, fakeMD5, md5)
 }
 
 // Test hashes on deleting an object

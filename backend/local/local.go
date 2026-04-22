@@ -324,6 +324,18 @@ only useful for reading.
 				Advanced: true,
 			},
 			{
+				Name: "xattr_hashes",
+				Help: `Cache computed hashes in extended attributes.
+
+Store computed hashes in private "user.rclone.hash.*" xattrs together
+with the file mtime and size so rclone can reuse them later if the file
+appears unchanged.
+
+This is disabled by default.`,
+				Default:  false,
+				Advanced: true,
+			},
+			{
 				Name:     config.ConfigEncoding,
 				Help:     config.ConfigEncodingHelp,
 				Advanced: true,
@@ -351,6 +363,7 @@ type Options struct {
 	NoSetModTime      bool                 `config:"no_set_modtime"`
 	TimeType          timeType             `config:"time_type"`
 	Hashes            fs.CommaSepList      `config:"hashes"`
+	XattrHashes       bool                 `config:"xattr_hashes"`
 	Enc               encoder.MultiEncoder `config:"encoding"`
 	NoClone           bool                 `config:"no_clone"`
 }
@@ -1162,6 +1175,21 @@ func (o *Object) Hash(ctx context.Context, r hash.Type) (string, error) {
 	o.fs.objectMetaMu.RLock()
 	hashValue, hashFound := o.hashes[r]
 	o.fs.objectMetaMu.RUnlock()
+	if !changed && !hashFound {
+		cachedHash, cached, cacheErr := o.getCachedHash(r)
+		if cacheErr != nil {
+			fs.Debugf(o, "Failed to read cached %s hash: %v", r, cacheErr)
+		} else if cached {
+			o.fs.objectMetaMu.Lock()
+			if o.hashes == nil {
+				o.hashes = map[hash.Type]string{r: cachedHash}
+			} else {
+				o.hashes[r] = cachedHash
+			}
+			o.fs.objectMetaMu.Unlock()
+			return cachedHash, nil
+		}
+	}
 
 	if changed {
 		if transferHash, ok, err := o.HashFromTransfer(ctx, r); ok || err != nil {
@@ -1198,13 +1226,7 @@ func (o *Object) Hash(ctx context.Context, r hash.Type) (string, error) {
 			return "", fmt.Errorf("hash: failed to close: %w", closeErr)
 		}
 		hashValue = hashes[r]
-		o.fs.objectMetaMu.Lock()
-		if o.hashes == nil {
-			o.hashes = hashes
-		} else {
-			o.hashes[r] = hashValue
-		}
-		o.fs.objectMetaMu.Unlock()
+		o.rememberHashes(hashes)
 	}
 	return hashValue, nil
 }
@@ -1357,9 +1379,7 @@ func (file *localOpenFile) Close() (err error) {
 	err = file.in.Close()
 	if err == nil {
 		if file.hash.Size() == file.o.Size() {
-			file.o.fs.objectMetaMu.Lock()
-			file.o.hashes = file.hash.Sums()
-			file.o.fs.objectMetaMu.Unlock()
+			file.o.rememberHashes(file.hash.Sums())
 		}
 	}
 	return err
@@ -1465,13 +1485,7 @@ func (o *Object) HashFromTransfer(ctx context.Context, r hash.Type) (string, boo
 		return "", true, err
 	}
 	hashValue = hashes[r]
-	o.fs.objectMetaMu.Lock()
-	if o.hashes == nil {
-		o.hashes = hashes
-	} else {
-		o.hashes[r] = hashValue
-	}
-	o.fs.objectMetaMu.Unlock()
+	o.rememberHashes(hashes)
 	return hashValue, true, nil
 }
 
@@ -1562,13 +1576,7 @@ func (lt *localTransfer) Hash(ctx context.Context, r hash.Type) (string, error) 
 		return "", err
 	}
 	hashValue := hashes[r]
-	lt.o.fs.objectMetaMu.Lock()
-	if lt.o.hashes == nil {
-		lt.o.hashes = hashes
-	} else {
-		lt.o.hashes[r] = hashValue
-	}
-	lt.o.fs.objectMetaMu.Unlock()
+	lt.o.rememberHashes(hashes)
 	return hashValue, nil
 }
 
@@ -1637,6 +1645,7 @@ func (nwc nopWriterCloser) Close() error {
 func (o *Object) Update(ctx context.Context, in io.Reader, src fs.ObjectInfo, options ...fs.OpenOption) (err error) {
 	var out io.WriteCloser
 	var hasher *hash.MultiHasher
+	var computedHashes map[hash.Type]string
 	var verifyFD *os.File
 
 	for _, option := range options {
@@ -1742,9 +1751,7 @@ func (o *Object) Update(ctx context.Context, in io.Reader, src fs.ObjectInfo, op
 
 	// All successful so update the hashes
 	if hasher != nil {
-		o.fs.objectMetaMu.Lock()
-		o.hashes = hasher.Sums()
-		o.fs.objectMetaMu.Unlock()
+		computedHashes = hasher.Sums()
 	}
 	if verifyFD != nil {
 		if _, seekErr := verifyFD.Seek(0, io.SeekStart); seekErr != nil {
@@ -1773,7 +1780,12 @@ func (o *Object) Update(ctx context.Context, in io.Reader, src fs.ObjectInfo, op
 	}
 
 	// ReRead info now that we have finished
-	return o.refreshMetadata()
+	err = o.refreshMetadata()
+	if err != nil {
+		return err
+	}
+	o.rememberHashes(computedHashes)
+	return nil
 }
 
 var sparseWarning sync.Once
@@ -1789,6 +1801,7 @@ func (f *Fs) OpenWriterAt(ctx context.Context, remote string, size int64) (fs.Wr
 	o.fs.objectMetaMu.Lock()
 	o.size = size
 	o.fs.objectMetaMu.Unlock()
+	o.clearHashCache()
 
 	err := o.mkdirAll()
 	if err != nil {
@@ -1868,6 +1881,27 @@ func (o *Object) clearHashCache() {
 	o.fs.objectMetaMu.Lock()
 	o.hashes = nil
 	o.fs.objectMetaMu.Unlock()
+	if err := o.clearCachedHashes(); err != nil {
+		fs.Debugf(o, "Failed to clear cached hashes: %v", err)
+	}
+}
+
+func (o *Object) rememberHashes(hashes map[hash.Type]string) {
+	if len(hashes) == 0 {
+		return
+	}
+	o.fs.objectMetaMu.Lock()
+	if o.hashes == nil {
+		o.hashes = hashes
+	} else {
+		for t, sum := range hashes {
+			o.hashes[t] = sum
+		}
+	}
+	o.fs.objectMetaMu.Unlock()
+	if err := o.setCachedHashes(hashes); err != nil {
+		fs.Debugf(o, "Failed to cache hashes in xattrs: %v", err)
+	}
 }
 
 // Stat an Object into info

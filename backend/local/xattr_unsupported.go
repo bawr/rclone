@@ -8,6 +8,7 @@ import (
 	"os"
 
 	"github.com/rclone/rclone/fs"
+	"github.com/rclone/rclone/fs/hash"
 )
 
 const (
@@ -25,5 +26,17 @@ func (o *Object) setXattr(metadata fs.Metadata) (err error) {
 }
 
 func (o *Object) setXattrWithFD(fd *os.File, metadata fs.Metadata) (err error) {
+	return nil
+}
+
+func (o *Object) getCachedHash(t hash.Type) (string, bool, error) {
+	return "", false, nil
+}
+
+func (o *Object) setCachedHashes(hashes map[hash.Type]string) error {
+	return nil
+}
+
+func (o *Object) clearCachedHashes() error {
 	return nil
 }
