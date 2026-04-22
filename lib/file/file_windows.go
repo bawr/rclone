@@ -8,6 +8,8 @@ import (
 	"path/filepath"
 	"regexp"
 	"syscall"
+
+	"golang.org/x/sys/windows"
 )
 
 // OpenFile is the generalized open call; most users will use Open or Create
@@ -69,7 +71,21 @@ func OpenFile(path string, mode int, perm os.FileMode) (*os.File, error) {
 }
 
 func dup(f *os.File) (*os.File, error) {
-	return nil, errors.New("file dup not implemented on windows")
+	currentProcess := windows.CurrentProcess()
+	var handle windows.Handle
+	err := windows.DuplicateHandle(
+		currentProcess,
+		windows.Handle(f.Fd()),
+		currentProcess,
+		&handle,
+		0,
+		false,
+		windows.DUPLICATE_SAME_ACCESS,
+	)
+	if err != nil {
+		return nil, err
+	}
+	return os.NewFile(uintptr(handle), f.Name()), nil
 }
 
 // IsReserved checks if path contains a reserved name

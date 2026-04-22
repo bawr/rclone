@@ -92,10 +92,6 @@ func TestOpenFileDelete(t *testing.T) {
 }
 
 func TestDupFileDelete(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("Skipping dup test on windows")
-	}
-
 	dir := t.TempDir()
 	filepath := path.Join(dir, "file1")
 
