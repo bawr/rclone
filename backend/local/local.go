@@ -1413,6 +1413,9 @@ func (o *Object) dupTransferFD() (*os.File, bool, error) {
 	}
 	fd, err := file.Dup(o.transferFD)
 	if err != nil {
+		if errors.Is(err, file.ErrDupNotSupported) {
+			return nil, false, nil
+		}
 		return nil, true, err
 	}
 	return fd, true, nil
@@ -1569,7 +1572,12 @@ func (o *Object) OpenTransfer(ctx context.Context) (fs.TransferReader, error) {
 func (lt *localTransfer) Open(options ...fs.OpenOption) (io.ReadCloser, error) {
 	fd, err := file.Dup(lt.fd)
 	if err != nil {
-		return nil, err
+		if errors.Is(err, file.ErrDupNotSupported) {
+			fd, err = file.Open(lt.o.path)
+		}
+		if err != nil {
+			return nil, err
+		}
 	}
 	return lt.o.openFD(fd, options...)
 }
@@ -1579,6 +1587,14 @@ func (lt *localTransfer) Hash(ctx context.Context, r hash.Type) (string, error) 
 		return "", nil
 	}
 	fd, err := file.Dup(lt.fd)
+	if err != nil {
+		if errors.Is(err, file.ErrDupNotSupported) {
+			fd, err = file.Open(lt.o.path)
+		}
+		if err != nil {
+			return "", err
+		}
+	}
 	if err != nil {
 		return "", err
 	}
@@ -1712,8 +1728,11 @@ func (o *Object) Update(ctx context.Context, in io.Reader, src fs.ObjectInfo, op
 		}
 		verifyFD, err = file.Dup(f)
 		if err != nil {
-			_ = f.Close()
-			return err
+			if !errors.Is(err, file.ErrDupNotSupported) {
+				_ = f.Close()
+				return err
+			}
+			verifyFD = nil
 		}
 		out = f
 	} else {
@@ -1848,14 +1867,19 @@ func (f *Fs) OpenWriterAt(ctx context.Context, remote string, size int64) (fs.Wr
 
 	verifyFD, err := file.Dup(out)
 	if err != nil {
-		_ = out.Close()
-		return nil, err
+		if !errors.Is(err, file.ErrDupNotSupported) {
+			_ = out.Close()
+			return nil, err
+		}
+		verifyFD = nil
 	}
-	err = o.replaceTransferFD(verifyFD)
-	if err != nil {
-		_ = verifyFD.Close()
-		_ = out.Close()
-		return nil, err
+	if verifyFD != nil {
+		err = o.replaceTransferFD(verifyFD)
+		if err != nil {
+			_ = verifyFD.Close()
+			_ = out.Close()
+			return nil, err
+		}
 	}
 
 	return &localWriterAt{File: out, o: o}, nil

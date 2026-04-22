@@ -2,7 +2,13 @@
 // which can be renamed and deleted under Windows.
 package file
 
-import "os"
+import (
+	"errors"
+	"os"
+)
+
+// ErrDupNotSupported is returned when Dup is not available on the current platform.
+var ErrDupNotSupported = errors.New("file dup not supported on this platform")
 
 // Open opens the named file for reading. If successful, methods on
 // the returned file can be used for reading; the associated file
