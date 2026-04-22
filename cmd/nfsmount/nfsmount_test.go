@@ -26,6 +26,9 @@ func commandOK(name string, arg ...string) bool {
 }
 
 func TestMount(t *testing.T) {
+	if runtime.GOOS == "darwin" {
+		t.Skip("nfsmount integration tests require mount permissions not available on macOS")
+	}
 	if runtime.GOOS != "darwin" {
 		if !commandOK("sudo", "-n", "mount", "--help") {
 			t.Skip("Can't run sudo mount without a password")

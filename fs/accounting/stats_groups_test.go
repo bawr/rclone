@@ -97,6 +97,9 @@ func TestStatsGroupOperations(t *testing.T) {
 
 	t.Run("memory is reclaimed", func(t *testing.T) {
 		testy.SkipUnreliable(t)
+		if runtime.GOOS == "darwin" {
+			t.Skip("HeapObjects accounting is too noisy on macOS")
+		}
 		var (
 			count      = 1000
 			start, end runtime.MemStats

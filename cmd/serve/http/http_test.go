@@ -1,6 +1,8 @@
 package http
 
 import (
+	"archive/zip"
+	"bytes"
 	"compress/gzip"
 	"context"
 	"flag"
@@ -102,10 +104,39 @@ func checkGolden(t *testing.T, fileName string, got []byte) {
 	} else {
 		want, err := os.ReadFile(fileName)
 		require.NoError(t, err)
+		if filepath.Ext(fileName) == ".zip" {
+			assert.Equal(t, readZipEntries(t, want), readZipEntries(t, got), fileName)
+			return
+		}
 		wants := strings.Split(string(want), "\n")
 		gots := strings.Split(string(got), "\n")
 		assert.Equal(t, wants, gots, fileName)
 	}
+}
+
+type zipEntry struct {
+	Name string
+	Body []byte
+}
+
+func readZipEntries(t *testing.T, data []byte) []zipEntry {
+	t.Helper()
+	reader, err := zip.NewReader(bytes.NewReader(data), int64(len(data)))
+	require.NoError(t, err)
+	entries := make([]zipEntry, 0, len(reader.File))
+	for _, file := range reader.File {
+		rc, err := file.Open()
+		require.NoError(t, err)
+		body, readErr := io.ReadAll(rc)
+		closeErr := rc.Close()
+		require.NoError(t, readErr)
+		require.NoError(t, closeErr)
+		entries = append(entries, zipEntry{
+			Name: file.Name,
+			Body: body,
+		})
+	}
+	return entries
 }
 
 func testGET(t *testing.T, useProxy bool) {

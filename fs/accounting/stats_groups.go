@@ -449,4 +449,9 @@ func (sg *statsGroups) delete(group string) {
 		}
 	}
 	sg.order = tmp
+	if len(sg.m) == 0 {
+		// Drop grown backing storage once the collection is empty so memory can be reclaimed.
+		sg.m = make(map[string]*StatsInfo)
+		sg.order = nil
+	}
 }

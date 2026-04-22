@@ -1832,6 +1832,11 @@ func (f *Fs) Copy(ctx context.Context, src fs.Object, remote string) (fs.Object,
 	if baseCopy == nil {
 		return nil, fs.ErrorCantCopy
 	}
+	if obj, ok := src.(*Object); ok {
+		if err := obj.readMetadata(ctx); err == ErrMetaUnknown {
+			return nil, fmt.Errorf("can't copy this file: %w", err)
+		}
+	}
 	obj, md5, sha1, ok := f.okForServerSide(ctx, src, "copy")
 	if !ok {
 		return nil, fs.ErrorCantCopy
@@ -1851,6 +1856,11 @@ func (f *Fs) Copy(ctx context.Context, src fs.Object, remote string) (fs.Object,
 func (f *Fs) Move(ctx context.Context, src fs.Object, remote string) (fs.Object, error) {
 	baseMove := func(ctx context.Context, src fs.Object, remote string) (fs.Object, error) {
 		return f.baseMove(ctx, src, remote, delNever)
+	}
+	if obj, ok := src.(*Object); ok {
+		if err := obj.readMetadata(ctx); err == ErrMetaUnknown {
+			return nil, fmt.Errorf("can't move this file: %w", err)
+		}
 	}
 	obj, md5, sha1, ok := f.okForServerSide(ctx, src, "move")
 	if !ok {
