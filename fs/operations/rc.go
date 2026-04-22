@@ -166,7 +166,8 @@ func init() {
 			Fn: func(ctx context.Context, in rc.Params) (rc.Params, error) {
 				return rcMoveOrCopyFile(ctx, in, copy)
 			},
-			Title: name + " a file from source remote to destination remote",
+			JobPreflight: rcJobPreflightMoveOrCopyFile,
+			Title:        name + " a file from source remote to destination remote",
 			Help: `This takes the following parameters:
 
 - srcFs - a remote name string e.g. "drive:" for the source, "/" for local filesystem
@@ -176,6 +177,25 @@ func init() {
 `,
 		})
 	}
+}
+
+func rcJobPreflightMoveOrCopyFile(ctx context.Context, in rc.Params) (context.Context, func(), error) {
+	srcFs, srcRemote, err := rc.GetFsAndRemoteNamed(ctx, in, "srcFs", "srcRemote")
+	if err != nil {
+		return ctx, nil, err
+	}
+	srcObj, err := srcFs.NewObject(ctx, srcRemote)
+	if err != nil {
+		return ctx, nil, err
+	}
+	transfer, ok, err := openTransfer(ctx, srcObj)
+	if err != nil || !ok {
+		return ctx, nil, err
+	}
+	ctx = stashTransferObject(ctx, srcObj, transfer)
+	return ctx, func() {
+		_ = releaseTransfer(ctx, srcFs, srcRemote)
+	}, nil
 }
 
 // Copy a file

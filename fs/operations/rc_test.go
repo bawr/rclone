@@ -18,6 +18,7 @@ import (
 	"github.com/rclone/rclone/fs/hash"
 	"github.com/rclone/rclone/fs/operations"
 	"github.com/rclone/rclone/fs/rc"
+	"github.com/rclone/rclone/fs/rc/jobs"
 	"github.com/rclone/rclone/fstest"
 	"github.com/rclone/rclone/lib/diskusage"
 	"github.com/rclone/rclone/lib/rest"
@@ -91,6 +92,43 @@ func TestRcCopyfile(t *testing.T) {
 	assert.Equal(t, rc.Params(nil), out)
 
 	r.CheckLocalItems(t, file1)
+	file1.Path = "file1-renamed"
+	r.CheckRemoteItems(t, file1)
+}
+
+func TestRcCopyfileAsyncPreflightOpensSource(t *testing.T) {
+	r, origCall := rcNewRun(t, "operations/copyfile")
+	file1 := r.WriteFile("file1", "file1 contents", t1)
+	r.Mkdir(context.Background(), r.Fremote)
+	r.Fremote.Features().Copy = nil
+
+	start := make(chan struct{})
+	call := *origCall
+	call.Fn = func(ctx context.Context, in rc.Params) (rc.Params, error) {
+		<-start
+		return origCall.Fn(ctx, in)
+	}
+
+	in := rc.Params{
+		"srcFs":     r.LocalName,
+		"srcRemote": "file1",
+		"dstFs":     r.FremoteName,
+		"dstRemote": "file1-renamed",
+		"_async":    true,
+	}
+	job, out, err := jobs.NewCallJob(context.Background(), &call, in)
+	require.NoError(t, err)
+	require.Equal(t, job.ID, out["jobid"])
+
+	require.NoError(t, os.Remove(path.Join(r.LocalName, "file1")))
+	close(start)
+
+	wait := make(chan struct{})
+	cancel := job.OnFinish(func() { close(wait) })
+	defer cancel()
+	<-wait
+
+	require.True(t, job.Success, job.Error)
 	file1.Path = "file1-renamed"
 	r.CheckRemoteItems(t, file1)
 }

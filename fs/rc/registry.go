@@ -12,16 +12,24 @@ import (
 // Func defines a type for a remote control function
 type Func func(ctx context.Context, in Params) (out Params, err error)
 
+// JobPreflight defines optional synchronous setup for async rc jobs.
+//
+// It runs before an async job returns its jobid, and may return a new
+// context plus a cleanup function which will be called once the job has
+// finished if the job itself hasn't already consumed the prepared state.
+type JobPreflight func(ctx context.Context, in Params) (newCtx context.Context, cleanup func(), err error)
+
 // Call defines info about a remote control function and is used in
 // the Add function to create new entry points.
 type Call struct {
-	Path          string // path to activate this RC
-	Fn            Func   `json:"-"` // function to call
-	Title         string // help for the function
-	NoAuth        bool   // if set then this call does not require authentication
-	Help          string // multi-line markdown formatted help
-	NeedsRequest  bool   // if set then this call will be passed the original request object as _request
-	NeedsResponse bool   // if set then this call will be passed the original response object as _response
+	Path          string       // path to activate this RC
+	Fn            Func         `json:"-"` // function to call
+	JobPreflight  JobPreflight `json:"-"` // optional synchronous setup for async jobs
+	Title         string       // help for the function
+	NoAuth        bool         // if set then this call does not require authentication
+	Help          string       // multi-line markdown formatted help
+	NeedsRequest  bool         // if set then this call will be passed the original request object as _request
+	NeedsResponse bool         // if set then this call will be passed the original response object as _response
 }
 
 // Registry holds the list of all the registered remote control functions

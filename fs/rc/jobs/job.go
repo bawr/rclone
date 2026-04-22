@@ -283,7 +283,7 @@ type jobKeyType struct{}
 var jobKey = jobKeyType{}
 
 // NewJob creates a Job and executes it, possibly in the background if _async is set
-func (jobs *Jobs) NewJob(ctx context.Context, fn rc.Func, in rc.Params) (job *Job, out rc.Params, err error) {
+func (jobs *Jobs) newJob(ctx context.Context, fn rc.Func, preflight rc.JobPreflight, in rc.Params) (job *Job, out rc.Params, err error) {
 	id := jobID.Add(1)
 	in = in.Copy() // copy input so we can change it
 
@@ -328,8 +328,29 @@ func (jobs *Jobs) NewJob(ctx context.Context, fn rc.Func, in rc.Params) (job *Jo
 	// Add the job to the context
 	ctx = context.WithValue(ctx, jobKey, job)
 
+	var cleanup func()
+	if isAsync && preflight != nil {
+		ctx, cleanup, err = preflight(ctx, in)
+		if err != nil {
+			jobs.mu.Lock()
+			delete(jobs.jobs, job.ID)
+			jobs.mu.Unlock()
+			if cleanup != nil {
+				cleanup()
+			}
+			return nil, nil, err
+		}
+	}
+
 	if isAsync {
-		go job.run(ctx, fn, in)
+		go func() {
+			defer func() {
+				if cleanup != nil {
+					cleanup()
+				}
+			}()
+			job.run(ctx, fn, in)
+		}()
 		out = make(rc.Params)
 		out["jobid"] = job.ID
 		out["executeId"] = job.ExecuteID
@@ -342,10 +363,21 @@ func (jobs *Jobs) NewJob(ctx context.Context, fn rc.Func, in rc.Params) (job *Jo
 	return job, out, err
 }
 
+// NewJob creates a Job and executes it, possibly in the background if _async is set
+func (jobs *Jobs) NewJob(ctx context.Context, fn rc.Func, in rc.Params) (job *Job, out rc.Params, err error) {
+	return jobs.newJob(ctx, fn, nil, in)
+}
+
 // NewJob creates a Job and executes it on the global job queue,
 // possibly in the background if _async is set
 func NewJob(ctx context.Context, fn rc.Func, in rc.Params) (job *Job, out rc.Params, err error) {
 	return running.NewJob(ctx, fn, in)
+}
+
+// NewCallJob creates a Job for a registered rc call and runs its
+// optional async preflight before returning a jobid.
+func NewCallJob(ctx context.Context, call *rc.Call, in rc.Params) (job *Job, out rc.Params, err error) {
+	return running.newJob(ctx, call.Fn, call.JobPreflight, in)
 }
 
 // OnFinish adds listener to jobid that will be triggered when job is finished.
@@ -550,7 +582,7 @@ func NewJobFromParams(ctx context.Context, in rc.Params) (out rc.Params) {
 	}
 
 	fs.Debugf(nil, "rc: %q: with parameters %+v", path, in)
-	_, out, err = NewJob(ctx, call.Fn, in)
+	_, out, err = NewCallJob(ctx, call, in)
 	if err != nil {
 		return rcError(err, http.StatusInternalServerError)
 	}
@@ -691,7 +723,7 @@ func runBatchJob(ctx context.Context, inputAny any) (out rc.Params, err error) {
 	}
 
 	// Run the job
-	_, out, err = NewJob(ctx, call.Fn, in)
+	_, out, err = NewCallJob(ctx, call, in)
 	if err != nil {
 		return nil, err
 	}

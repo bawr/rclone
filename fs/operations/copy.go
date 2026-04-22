@@ -95,6 +95,10 @@ func (c *copy) ensureSrcTransfer(ctx context.Context) error {
 	if c.srcTransfer != nil {
 		return nil
 	}
+	c.srcTransfer = claimTransfer(ctx, c.src)
+	if c.srcTransfer != nil {
+		return nil
+	}
 	transfer, ok, err := openTransfer(ctx, c.src)
 	if err != nil || !ok {
 		return err

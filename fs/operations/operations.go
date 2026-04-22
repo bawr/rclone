@@ -2034,10 +2034,13 @@ func moveOrCopyFile(ctx context.Context, fdst fs.Fs, fsrc fs.Fs, dstFileName str
 	}
 
 	// Find src object
-	srcObj, err := fsrc.NewObject(ctx, srcFileName)
-	if err != nil {
-		logger(ctx, TransferError, srcObj, nil, err)
-		return err
+	srcObj := contextSourceObject(ctx, fsrc, srcFileName)
+	if srcObj == nil {
+		srcObj, err = fsrc.NewObject(ctx, srcFileName)
+		if err != nil {
+			logger(ctx, TransferError, srcObj, nil, err)
+			return err
+		}
 	}
 
 	// Find dst object if it exists
