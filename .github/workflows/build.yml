@@ -24,7 +24,7 @@ permissions:
 
 jobs:
   build:
-    if: inputs.manual || (github.repository == 'rclone/rclone' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name != github.event.pull_request.base.repo.full_name))
+    if: inputs.manual || github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name != github.event.pull_request.base.repo.full_name
     timeout-minutes: 60
     defaults:
       run:
@@ -204,7 +204,7 @@ jobs:
         run: |
           if [[ "${{ matrix.os }}" == "ubuntu-latest" ]]; then make release_dep_linux ; fi
           make ci_beta_build
-        if: github.event_name == 'push' && github.ref == 'refs/heads/master' && github.repository == 'rclone/rclone' && matrix.deploy
+        if: github.event_name == 'push' && github.ref == 'refs/heads/master' && matrix.deploy
 
       - name: Upload packaged binaries artifact
         uses: actions/upload-artifact@v7
@@ -213,7 +213,7 @@ jobs:
           path: build/*
           retention-days: 14
           if-no-files-found: error
-        if: github.event_name == 'push' && github.ref == 'refs/heads/master' && github.repository == 'rclone/rclone' && matrix.deploy
+        if: github.event_name == 'push' && github.ref == 'refs/heads/master' && matrix.deploy
 
       - name: Deploy built binaries from packaged build
         run: |
@@ -222,7 +222,7 @@ jobs:
           RCLONE_CONFIG_PASS: ${{ secrets.RCLONE_CONFIG_PASS }}
         # working-directory: '$(modulePath)'
         # Deploy binaries if enabled in config && built from a push to master
-        if: env.RCLONE_CONFIG_PASS != '' && matrix.deploy && github.event_name == 'push' && github.ref == 'refs/heads/master' && github.repository == 'rclone/rclone'
+        if: env.RCLONE_CONFIG_PASS != '' && matrix.deploy && github.event_name == 'push' && github.ref == 'refs/heads/master'
 
       - name: Deploy built binaries
         run: |
@@ -232,10 +232,10 @@ jobs:
           RCLONE_CONFIG_PASS: ${{ secrets.RCLONE_CONFIG_PASS }}
         # working-directory: '$(modulePath)'
         # Deploy binaries if enabled in config && not a PR && not a fork
-        if: env.RCLONE_CONFIG_PASS != '' && matrix.deploy && github.head_ref == '' && github.repository == 'rclone/rclone' && (github.event_name != 'push' || github.ref != 'refs/heads/master')
+        if: env.RCLONE_CONFIG_PASS != '' && matrix.deploy && github.head_ref == '' && (github.event_name != 'push' || github.ref != 'refs/heads/master')
 
   lint:
-    if: inputs.manual || (github.repository == 'rclone/rclone' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name != github.event.pull_request.base.repo.full_name))
+    if: inputs.manual || github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name != github.event.pull_request.base.repo.full_name
     timeout-minutes: 30
     name: "lint"
     runs-on: ubuntu-latest
@@ -332,7 +332,7 @@ jobs:
         if: github.event_name == 'pull_request'
 
   android:
-    if: inputs.manual || (github.repository == 'rclone/rclone' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name != github.event.pull_request.base.repo.full_name))
+    if: inputs.manual || github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name != github.event.pull_request.base.repo.full_name
     timeout-minutes: 30
     name: "android-all"
     runs-on: ubuntu-latest
@@ -422,4 +422,4 @@ jobs:
         env:
           RCLONE_CONFIG_PASS: ${{ secrets.RCLONE_CONFIG_PASS }}
         # Upload artifacts if not a PR && not a fork
-        if: env.RCLONE_CONFIG_PASS != '' && github.head_ref == '' && github.repository == 'rclone/rclone'
+        if: env.RCLONE_CONFIG_PASS != '' && github.head_ref == ''
