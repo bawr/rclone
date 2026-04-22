@@ -609,7 +609,16 @@ func (f *Fs) newDirectory(dir string, fi os.FileInfo) *Directory {
 	o := f.newObject(dir)
 	o.setMetadata(fi)
 	return &Directory{
-		Object: *o,
+		Object: Object{
+			fs:             o.fs,
+			remote:         o.remote,
+			path:           o.path,
+			size:           o.size,
+			mode:           o.mode,
+			modTime:        o.modTime,
+			hashes:         o.hashes,
+			translatedLink: o.translatedLink,
+		},
 	}
 }
 
@@ -1409,6 +1418,7 @@ func (o *Object) dupTransferFD() (*os.File, bool, error) {
 	return fd, true, nil
 }
 
+// CloseTransfer releases any cached transfer handle for the object.
 func (o *Object) CloseTransfer() error {
 	return o.replaceTransferFD(nil)
 }
@@ -1465,6 +1475,7 @@ func (o *Object) hashFromFD(ctx context.Context, fd *os.File, r hash.Type) (map[
 	return hash.StreamTypes(readers.NewContextReader(ctx, io.NopCloser(reader)), hash.NewHashSet(r))
 }
 
+// HashFromTransfer calculates a hash using the cached transfer handle when available.
 func (o *Object) HashFromTransfer(ctx context.Context, r hash.Type) (string, bool, error) {
 	if r == hash.None {
 		return "", true, nil
@@ -1540,6 +1551,7 @@ func (o *Object) openFD(fd *os.File, options ...fs.OpenOption) (in io.ReadCloser
 	}, nil
 }
 
+// OpenTransfer opens the object for transfer-aware reads.
 func (o *Object) OpenTransfer(ctx context.Context) (fs.TransferReader, error) {
 	if o.translatedLink {
 		return nil, fs.ErrorNotImplemented

@@ -39,17 +39,6 @@ func ensureTransferMap(ctx context.Context) (context.Context, *transferMap) {
 	return ctx, transfers
 }
 
-func stashTransfer(ctx context.Context, info fs.Info, remote string, transfer fs.TransferReader) context.Context {
-	ctx, transfers := ensureTransferMap(ctx)
-	transfers.mu.Lock()
-	key := transferKey(info, remote)
-	entry := transfers.transfers[key]
-	entry.transfer = transfer
-	transfers.transfers[key] = entry
-	transfers.mu.Unlock()
-	return ctx
-}
-
 func stashTransferObject(ctx context.Context, obj fs.Object, transfer fs.TransferReader) context.Context {
 	ctx, transfers := ensureTransferMap(ctx)
 	key := transferKey(obj.Fs(), obj.Remote())

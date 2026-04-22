@@ -125,7 +125,7 @@ func (t *countingTransferReader) Close() error {
 	return t.TransferReader.Close()
 }
 
-func newMockObject(t *testing.T, ctx context.Context, remote string) fs.Object {
+func newMockObject(ctx context.Context, t *testing.T, remote string) fs.Object {
 	t.Helper()
 	f, err := mockfs.NewFs(ctx, "mock", "", nil)
 	require.NoError(t, err)
@@ -134,7 +134,7 @@ func newMockObject(t *testing.T, ctx context.Context, remote string) fs.Object {
 	return obj
 }
 
-func newLocalObject(t *testing.T, ctx context.Context, root, remote, contents string) (fs.Fs, fs.Object) {
+func newLocalObject(ctx context.Context, t *testing.T, root, remote, contents string) (fs.Fs, fs.Object) {
 	t.Helper()
 	require.NoError(t, os.MkdirAll(filepath.Dir(filepath.Join(root, remote)), 0o755))
 	require.NoError(t, os.WriteFile(filepath.Join(root, remote), []byte(contents), 0o666))
@@ -149,7 +149,7 @@ func TestTransferHelpers(t *testing.T) {
 	ctx := context.Background()
 
 	t.Run("stash-claim-release", func(t *testing.T) {
-		obj := newMockObject(t, ctx, "file.txt")
+		obj := newMockObject(ctx, t, "file.txt")
 		transfer := &testTransferReader{}
 
 		ctx := stashTransferObject(ctx, obj, transfer)
@@ -161,7 +161,7 @@ func TestTransferHelpers(t *testing.T) {
 	})
 
 	t.Run("release-closes-unclaimed", func(t *testing.T) {
-		obj := newMockObject(t, ctx, "file.txt")
+		obj := newMockObject(ctx, t, "file.txt")
 		transfer := &testTransferReader{}
 
 		ctx := stashTransferObject(ctx, obj, transfer)
@@ -174,7 +174,7 @@ func TestTransferHelpers(t *testing.T) {
 	t.Run("unwraps-transfer-interfaces", func(t *testing.T) {
 		transfer := &testTransferReader{}
 		inner := &transferTestObject{
-			Object:   newMockObject(t, ctx, "wrapped.txt"),
+			Object:   newMockObject(ctx, t, "wrapped.txt"),
 			transfer: transfer,
 			hash:     "wrapped-sum",
 		}
@@ -198,7 +198,7 @@ func TestTransferHelpers(t *testing.T) {
 func TestCopyResetSrcTransfer(t *testing.T) {
 	ctx := context.Background()
 	root := t.TempDir()
-	_, src := newLocalObject(t, ctx, filepath.Join(root, "src"), "file.txt", "hello world")
+	_, src := newLocalObject(ctx, t, filepath.Join(root, "src"), "file.txt", "hello world")
 	wrapped := &countingTransferObject{Object: src}
 	c := &copy{src: wrapped}
 
@@ -220,7 +220,7 @@ func TestCopyUsesRetainedTransferForVerify(t *testing.T) {
 	srcRoot := filepath.Join(root, "src")
 	dstRoot := filepath.Join(root, "dst")
 
-	_, src := newLocalObject(t, ctx, srcRoot, "file.txt", "hello world")
+	_, src := newLocalObject(ctx, t, srcRoot, "file.txt", "hello world")
 	require.NoError(t, os.MkdirAll(dstRoot, 0o755))
 	dstFs, err := fs.NewFs(ctx, dstRoot)
 	require.NoError(t, err)
@@ -257,7 +257,7 @@ func TestCopyMultiThreadUsesSingleTransferHandle(t *testing.T) {
 	srcRoot := filepath.Join(root, "src")
 	dstRoot := filepath.Join(root, "dst")
 
-	_, src := newLocalObject(t, ctx, srcRoot, "file.txt", strings.Repeat("x", 1024))
+	_, src := newLocalObject(ctx, t, srcRoot, "file.txt", strings.Repeat("x", 1024))
 	require.NoError(t, os.MkdirAll(dstRoot, 0o755))
 	dstFs, err := fs.NewFs(ctx, dstRoot)
 	require.NoError(t, err)
