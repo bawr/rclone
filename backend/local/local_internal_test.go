@@ -365,6 +365,125 @@ func TestOpenWriterAtHashAfterDelete(t *testing.T) {
 	assert.Equal(t, "5eb63bbbe01eeed093cb22bb8f5acdc3", md5)
 }
 
+func TestOpenWriterAtHashUsesActualSize(t *testing.T) {
+	ctx := context.Background()
+	r := fstest.NewRun(t)
+	const filePath = "writer-at-actual-size.txt"
+	const contents = "hello world"
+	f := r.Flocal.(*Fs)
+
+	writer, err := f.OpenWriterAt(ctx, filePath, 5)
+	require.NoError(t, err)
+	_, err = writer.WriteAt([]byte(contents), 0)
+	require.NoError(t, err)
+	require.NoError(t, writer.Close())
+
+	obj := writer.(fs.WrittenObjecter).Object().(*Object)
+	defer func() {
+		require.NoError(t, obj.CloseTransfer())
+	}()
+
+	md5, err := obj.Hash(ctx, hash.MD5)
+	require.NoError(t, err)
+	assert.Equal(t, "5eb63bbbe01eeed093cb22bb8f5acdc3", md5)
+	assert.Equal(t, int64(len(contents)), obj.Size())
+}
+
+func TestSetModTimeUsesTransferHandleAfterPathReplace(t *testing.T) {
+	ctx := context.Background()
+	r := fstest.NewRun(t)
+	const filePath = "dest.txt"
+	const movedPath = "dest-moved.txt"
+	const contents = "hello world"
+	when := time.Now()
+	replacementTime := fstest.Time("2001-02-03T04:05:06.123456789Z")
+	newModTime := fstest.Time("2004-05-06T07:08:09.987654321Z")
+	f := r.Flocal.(*Fs)
+	o := f.newObject(filePath)
+
+	src := object.NewStaticObjectInfo(filePath, when, int64(len(contents)), true, nil, f)
+	err := o.Update(ctx, bytes.NewBufferString(contents), src)
+	require.NoError(t, err)
+	defer func() {
+		require.NoError(t, o.CloseTransfer())
+	}()
+
+	oldPath := filepath.Join(f.root, filePath)
+	require.NoError(t, os.Rename(oldPath, filepath.Join(f.root, movedPath)))
+	require.NoError(t, os.WriteFile(oldPath, []byte("replacement"), 0o644))
+	require.NoError(t, os.Chtimes(oldPath, replacementTime, replacementTime))
+
+	err = o.SetModTime(ctx, newModTime)
+	require.NoError(t, err)
+
+	movedObj := f.newObject(movedPath)
+	require.NoError(t, movedObj.lstat())
+	replacementObj := f.newObject(filePath)
+	require.NoError(t, replacementObj.lstat())
+
+	assert.WithinDuration(t, newModTime, movedObj.ModTime(ctx), time.Second)
+	assert.WithinDuration(t, replacementTime, replacementObj.ModTime(ctx), time.Second)
+	assert.WithinDuration(t, newModTime, o.ModTime(ctx), time.Second)
+}
+
+func TestSetMetadataUsesTransferHandleAfterPathReplace(t *testing.T) {
+	ctx := context.Background()
+	r := fstest.NewRun(t)
+	const filePath = "dest-metadata.txt"
+	const movedPath = "dest-metadata-moved.txt"
+	const contents = "hello world"
+	when := time.Now()
+	replacementTime := fstest.Time("2001-02-03T04:05:06.123456789Z")
+	newModTime := fstest.Time("2004-05-06T07:08:09.987654321Z")
+	f := r.Flocal.(*Fs)
+	o := f.newObject(filePath)
+
+	src := object.NewStaticObjectInfo(filePath, when, int64(len(contents)), true, nil, f)
+	err := o.Update(ctx, bytes.NewBufferString(contents), src)
+	require.NoError(t, err)
+	defer func() {
+		require.NoError(t, o.CloseTransfer())
+	}()
+
+	oldPath := filepath.Join(f.root, filePath)
+	require.NoError(t, os.Rename(oldPath, filepath.Join(f.root, movedPath)))
+	require.NoError(t, os.WriteFile(oldPath, []byte("replacement"), 0o644))
+	require.NoError(t, os.Chtimes(oldPath, replacementTime, replacementTime))
+	if runtime.GOOS != "windows" {
+		require.NoError(t, os.Chmod(oldPath, 0o644))
+	}
+
+	meta := fs.Metadata{
+		"mtime":  newModTime.Format(time.RFC3339Nano),
+		"mode":   "0600",
+		"potato": "wedges",
+	}
+	err = o.SetMetadata(ctx, meta)
+	require.NoError(t, err)
+
+	movedObj := f.newObject(movedPath)
+	require.NoError(t, movedObj.lstat())
+	replacementObj := f.newObject(filePath)
+	require.NoError(t, replacementObj.lstat())
+
+	assert.WithinDuration(t, newModTime, movedObj.ModTime(ctx), time.Second)
+	assert.WithinDuration(t, replacementTime, replacementObj.ModTime(ctx), time.Second)
+
+	if runtime.GOOS != "windows" {
+		assert.Equal(t, os.FileMode(0o600), movedObj.mode.Perm())
+		assert.Equal(t, os.FileMode(0o644), replacementObj.mode.Perm())
+	}
+
+	movedMeta, err := movedObj.Metadata(ctx)
+	require.NoError(t, err)
+	replacementMeta, err := replacementObj.Metadata(ctx)
+	require.NoError(t, err)
+	if xattrSupported && f.xattrSupported.Load() != 0 {
+		assert.Equal(t, "wedges", movedMeta["potato"])
+		assert.Empty(t, replacementMeta["potato"])
+	}
+}
+
 func TestMetadata(t *testing.T) {
 	ctx := context.Background()
 	r := fstest.NewRun(t)

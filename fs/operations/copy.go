@@ -91,6 +91,15 @@ func (c *copy) closeTransfers(objs ...fs.Object) error {
 	return err
 }
 
+func (c *copy) resetSrcTransfer() error {
+	if c.srcTransfer == nil {
+		return nil
+	}
+	err := c.srcTransfer.Close()
+	c.srcTransfer = nil
+	return err
+}
+
 func (c *copy) ensureSrcTransfer(ctx context.Context) error {
 	if c.srcTransfer != nil {
 		return nil
@@ -245,7 +254,7 @@ func (c *copy) serverSideCopy(ctx context.Context) (actionTaken string, newDst f
 
 // Copy c.src to (c.f, c.remoteForCopy) using multiThreadCopy
 func (c *copy) multiThreadCopy(ctx context.Context, uploadOptions []fs.OpenOption) (actionTaken string, newDst fs.Object, err error) {
-	newDst, err = multiThreadCopy(ctx, c.f, c.remoteForCopy, c.src, c.ci.MultiThreadStreams, c.tr, uploadOptions...)
+	newDst, err = multiThreadCopy(ctx, c.f, c.remoteForCopy, c.src, c.srcTransfer, c.ci.MultiThreadStreams, c.tr, uploadOptions...)
 	if c.doUpdate {
 		actionTaken = "Multi-thread Copied (replaced existing)"
 	} else {
@@ -396,6 +405,13 @@ func (c *copy) copy(ctx context.Context) (newDst fs.Object, err error) {
 	}()
 	retry := true
 	for tries := 0; retry && tries < c.maxTries; tries++ {
+		if tries > 0 {
+			resetErr := c.resetSrcTransfer()
+			if resetErr != nil {
+				return nil, resetErr
+			}
+		}
+
 		// Check we haven't hit any accounting limits
 		err = c.checkLimits(ctx)
 		if err != nil {

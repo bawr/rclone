@@ -159,7 +159,7 @@ func calculateNumChunks(size int64, chunkSize int64) int {
 
 // Copy src to (f, remote) using streams download threads. It tries to use the OpenChunkWriter feature
 // and if that's not available it creates an adapter using OpenWriterAt
-func multiThreadCopy(ctx context.Context, f fs.Fs, remote string, src fs.Object, concurrency int, tr *accounting.Transfer, options ...fs.OpenOption) (newDst fs.Object, err error) {
+func multiThreadCopy(ctx context.Context, f fs.Fs, remote string, src fs.Object, transfer fs.TransferReader, concurrency int, tr *accounting.Transfer, options ...fs.OpenOption) (newDst fs.Object, err error) {
 	openChunkWriter := f.Features().OpenChunkWriter
 	ci := fs.GetConfig(ctx)
 	noBuffering := false
@@ -240,6 +240,7 @@ func multiThreadCopy(ctx context.Context, f fs.Fs, remote string, src fs.Object,
 		ctx:         gCtx,
 		size:        src.Size(),
 		src:         src,
+		transfer:    transfer,
 		partSize:    info.ChunkSize,
 		numChunks:   numChunks,
 		noBuffering: noBuffering,
@@ -247,13 +248,6 @@ func multiThreadCopy(ctx context.Context, f fs.Fs, remote string, src fs.Object,
 
 	// Make accounting
 	mc.acc = tr.Account(gCtx, nil)
-	mc.transfer, _, err = openTransfer(gCtx, src)
-	if err != nil {
-		return nil, fmt.Errorf("multi-thread copy: failed to open transfer handle: %w", err)
-	}
-	if mc.transfer != nil {
-		defer fs.CheckClose(mc.transfer, &err)
-	}
 
 	fs.Debugf(src, "Starting multi-thread copy with %d chunks of size %v with %v parallel streams", mc.numChunks, fs.SizeSuffix(mc.partSize), concurrency)
 	for chunk := range mc.numChunks {

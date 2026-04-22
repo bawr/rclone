@@ -214,7 +214,7 @@ func TestMultithreadCopy(t *testing.T) {
 					tr.Done(ctx, err)
 				}()
 
-				dst, err = multiThreadCopy(ctx, fDst, fileName, src, test.streams, tr)
+				dst, err = multiThreadCopy(ctx, fDst, fileName, src, nil, test.streams, tr)
 				require.NoError(t, err)
 
 				assert.Equal(t, src.Size(), dst.Size())
@@ -317,7 +317,7 @@ func TestMultithreadCopyAbort(t *testing.T) {
 		tr.Done(ctx, err)
 	}()
 	wg := new(sync.WaitGroup)
-	dst, err := multiThreadCopy(ctx, r.Fremote, fileName, errorObject{src, int64(size), wg}, 1, tr)
+	dst, err := multiThreadCopy(ctx, r.Fremote, fileName, errorObject{src, int64(size), wg}, nil, 1, tr)
 	assert.Error(t, err)
 	assert.Nil(t, dst)
 

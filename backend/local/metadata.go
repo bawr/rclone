@@ -87,6 +87,17 @@ func (o *Object) parseMetadataInt(m fs.Metadata, key string, base int) (result i
 //
 // It isn't possible to set the ctime and btime under Unix
 func (o *Object) writeMetadataToFile(m fs.Metadata) (outErr error) {
+	if !o.translatedLink {
+		fd, ok, err := o.dupTransferFD()
+		if err != nil {
+			return err
+		}
+		if ok {
+			defer fs.CheckClose(fd, &outErr)
+			return o.writeMetadataToFileHandle(fd, m)
+		}
+	}
+
 	var err error
 	atime, atimeOK := o.parseMetadataTime(m, "atime")
 	mtime, mtimeOK := o.parseMetadataTime(m, "mtime")
@@ -153,6 +164,59 @@ func (o *Object) writeMetadataToFile(m fs.Metadata) (outErr error) {
 				if err != nil {
 					outErr = fmt.Errorf("failed to change permissions: %w", err)
 				}
+			}
+		}
+	}
+	// FIXME not parsing rdev yet
+	return outErr
+}
+
+func (o *Object) writeMetadataToFileHandle(fd *os.File, m fs.Metadata) (outErr error) {
+	var err error
+	atime, atimeOK := o.parseMetadataTime(m, "atime")
+	mtime, mtimeOK := o.parseMetadataTime(m, "mtime")
+	btime, btimeOK := o.parseMetadataTime(m, "btime")
+	if atimeOK || mtimeOK {
+		if atimeOK && !mtimeOK {
+			mtime = atime
+		}
+		if !atimeOK && mtimeOK {
+			atime = mtime
+		}
+		err = setFileMetadataTimes(fd, atime, mtime, time.Time{})
+		if err != nil {
+			outErr = fmt.Errorf("failed to set times: %w", err)
+		}
+	}
+	if btimeOK {
+		err = setFileMetadataTimes(fd, time.Time{}, time.Time{}, btime)
+		if err != nil {
+			outErr = fmt.Errorf("failed to set birth (creation) time: %w", err)
+		}
+	}
+	uid, hasUID := o.parseMetadataInt(m, "uid", 10)
+	gid, hasGID := o.parseMetadataInt(m, "gid", 10)
+	if hasUID {
+		// FIXME should read UID and GID of current user and only attempt to set it if different
+		if !hasGID {
+			gid = uid
+		}
+		if runtime.GOOS == "windows" || runtime.GOOS == "plan9" {
+			fs.Debugf(o, "Ignoring request to set ownership %o.%o on this OS", gid, uid)
+		} else {
+			err = fd.Chown(uid, gid)
+			if err != nil {
+				outErr = fmt.Errorf("failed to change ownership: %w", err)
+			}
+		}
+	}
+	mode, hasMode := o.parseMetadataInt(m, "mode", 8)
+	if hasMode && mode >= 0 {
+		umode := uint(mode)
+		if umode <= math.MaxUint32 {
+			err = fd.Chmod(os.FileMode(umode))
+			if err != nil {
+				outErr = fmt.Errorf("failed to change permissions: %w", err)
 			}
 		}
 	}

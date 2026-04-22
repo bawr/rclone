@@ -30,12 +30,17 @@ func transferKey(info fs.Info, remote string) string {
 	return fmt.Sprintf("%s\x00%s\x00%s", info.Name(), info.Root(), remote)
 }
 
-func stashTransfer(ctx context.Context, info fs.Info, remote string, transfer fs.TransferReader) context.Context {
+func ensureTransferMap(ctx context.Context) (context.Context, *transferMap) {
 	transfers, ok := transferMapFromContext(ctx)
 	if !ok {
 		transfers = &transferMap{transfers: map[string]transferEntry{}}
 		ctx = context.WithValue(ctx, transferContextKey{}, transfers)
 	}
+	return ctx, transfers
+}
+
+func stashTransfer(ctx context.Context, info fs.Info, remote string, transfer fs.TransferReader) context.Context {
+	ctx, transfers := ensureTransferMap(ctx)
 	transfers.mu.Lock()
 	key := transferKey(info, remote)
 	entry := transfers.transfers[key]
@@ -46,13 +51,13 @@ func stashTransfer(ctx context.Context, info fs.Info, remote string, transfer fs
 }
 
 func stashTransferObject(ctx context.Context, obj fs.Object, transfer fs.TransferReader) context.Context {
-	ctx = stashTransfer(ctx, obj.Fs(), obj.Remote(), transfer)
-	transfers, _ := transferMapFromContext(ctx)
+	ctx, transfers := ensureTransferMap(ctx)
 	key := transferKey(obj.Fs(), obj.Remote())
 	transfers.mu.Lock()
-	entry := transfers.transfers[key]
-	entry.obj = obj
-	transfers.transfers[key] = entry
+	transfers.transfers[key] = transferEntry{
+		obj:      obj,
+		transfer: transfer,
+	}
 	transfers.mu.Unlock()
 	return ctx
 }

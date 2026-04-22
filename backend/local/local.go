@@ -1228,6 +1228,14 @@ func (o *Object) setTimes(atime, mtime time.Time) (err error) {
 	if o.translatedLink {
 		err = lChtimes(o.path, atime, mtime)
 	} else {
+		fd, ok, dupErr := o.dupTransferFD()
+		if dupErr != nil {
+			return dupErr
+		}
+		if ok {
+			defer fs.CheckClose(fd, &err)
+			return setFileMetadataTimes(fd, atime, mtime, time.Time{})
+		}
 		err = os.Chtimes(o.path, atime, mtime)
 	}
 	return err
@@ -1238,12 +1246,16 @@ func (o *Object) SetModTime(ctx context.Context, modTime time.Time) error {
 	if o.fs.opt.NoSetModTime {
 		return nil
 	}
-	err := o.setTimes(modTime, modTime)
+	atime, err := o.currentAtime()
+	if err != nil {
+		return err
+	}
+	err = o.setTimes(atime, modTime)
 	if err != nil {
 		return err
 	}
 	// Re-read metadata
-	return o.lstat()
+	return o.refreshMetadata()
 }
 
 // Storable returns a boolean showing if this object is storable
@@ -1302,6 +1314,14 @@ type readSeekCloser struct {
 
 func (lw *localWriterAt) Object() fs.Object {
 	return lw.o
+}
+
+func (lw *localWriterAt) Close() error {
+	err := lw.File.Close()
+	if err != nil {
+		return err
+	}
+	return lw.o.refreshMetadata()
 }
 
 // Read bytes from the object - see io.Reader
@@ -1373,6 +1393,58 @@ func (o *Object) CloseTransfer() error {
 	return o.replaceTransferFD(nil)
 }
 
+func (o *Object) transferFileInfo() (info os.FileInfo, ok bool, err error) {
+	fd, ok, err := o.dupTransferFD()
+	if !ok || err != nil {
+		return nil, ok, err
+	}
+	defer fs.CheckClose(fd, &err)
+	info, err = fd.Stat()
+	if err != nil {
+		return nil, true, err
+	}
+	return info, true, nil
+}
+
+func (o *Object) refreshMetadataFromTransfer() (bool, error) {
+	info, ok, err := o.transferFileInfo()
+	if !ok || err != nil {
+		return ok, err
+	}
+	o.setMetadata(info)
+	return true, nil
+}
+
+func (o *Object) refreshMetadata() error {
+	if ok, err := o.refreshMetadataFromTransfer(); ok || err != nil {
+		return err
+	}
+	return o.lstat()
+}
+
+func (o *Object) currentAtime() (time.Time, error) {
+	if info, ok, err := o.transferFileInfo(); ok || err != nil {
+		if err != nil {
+			return time.Time{}, err
+		}
+		return readTime(aTime, info), nil
+	}
+	info, err := o.fs.lstat(o.path)
+	if err != nil {
+		return time.Time{}, err
+	}
+	return readTime(aTime, info), nil
+}
+
+func (o *Object) hashFromFD(ctx context.Context, fd *os.File, r hash.Type) (map[hash.Type]string, error) {
+	info, err := fd.Stat()
+	if err != nil {
+		return nil, fmt.Errorf("hash: failed to stat transfer handle: %w", err)
+	}
+	reader := io.NewSectionReader(fd, 0, info.Size())
+	return hash.StreamTypes(readers.NewContextReader(ctx, io.NopCloser(reader)), hash.NewHashSet(r))
+}
+
 func (o *Object) HashFromTransfer(ctx context.Context, r hash.Type) (string, bool, error) {
 	if r == hash.None {
 		return "", true, nil
@@ -1388,10 +1460,9 @@ func (o *Object) HashFromTransfer(ctx context.Context, r hash.Type) (string, boo
 		return "", ok, err
 	}
 	defer fs.CheckClose(fd, &err)
-	reader := io.NewSectionReader(fd, 0, o.Size())
-	hashes, err := hash.StreamTypes(readers.NewContextReader(ctx, io.NopCloser(reader)), hash.NewHashSet(r))
+	hashes, err := o.hashFromFD(ctx, fd, r)
 	if err != nil {
-		return "", true, fmt.Errorf("hash: failed to read transfer handle: %w", err)
+		return "", true, err
 	}
 	hashValue = hashes[r]
 	o.fs.objectMetaMu.Lock()
@@ -1486,10 +1557,9 @@ func (lt *localTransfer) Hash(ctx context.Context, r hash.Type) (string, error) 
 		return "", err
 	}
 	defer fs.CheckClose(fd, &err)
-	reader := io.NewSectionReader(fd, 0, lt.o.Size())
-	hashes, err := hash.StreamTypes(readers.NewContextReader(ctx, io.NopCloser(reader)), hash.NewHashSet(r))
+	hashes, err := lt.o.hashFromFD(ctx, fd, r)
 	if err != nil {
-		return "", fmt.Errorf("hash: failed to read transfer handle: %w", err)
+		return "", err
 	}
 	hashValue := hashes[r]
 	lt.o.fs.objectMetaMu.Lock()
@@ -1703,7 +1773,7 @@ func (o *Object) Update(ctx context.Context, in io.Reader, src fs.ObjectInfo, op
 	}
 
 	// ReRead info now that we have finished
-	return o.lstat()
+	return o.refreshMetadata()
 }
 
 var sparseWarning sync.Once
@@ -1852,7 +1922,7 @@ func (o *Object) SetMetadata(ctx context.Context, metadata fs.Metadata) error {
 		return fmt.Errorf("SetMetadata failed on Object: %w", err)
 	}
 	// Re-read info now we have finished setting stuff
-	return o.lstat()
+	return o.refreshMetadata()
 }
 
 func cleanRootPath(s string, noUNC bool, enc encoder.MultiEncoder) string {

@@ -4,6 +4,7 @@ package local
 
 import (
 	"fmt"
+	"os"
 	"strings"
 	"syscall"
 
@@ -81,6 +82,9 @@ func (o *Object) getXattr() (metadata fs.Metadata, err error) {
 		}
 		metadata[k] = string(v)
 	}
+	if len(metadata) == 0 {
+		return nil, nil
+	}
 	return metadata, nil
 }
 
@@ -88,6 +92,16 @@ func (o *Object) getXattr() (metadata fs.Metadata, err error) {
 //
 // It doesn't set any attributes owned by this backend in metadataKeys
 func (o *Object) setXattr(metadata fs.Metadata) (err error) {
+	if !o.translatedLink {
+		fd, ok, dupErr := o.dupTransferFD()
+		if dupErr != nil {
+			return dupErr
+		}
+		if ok {
+			defer fs.CheckClose(fd, &err)
+			return o.setXattrWithFD(fd, metadata)
+		}
+	}
 	if !xattrSupported || o.fs.xattrSupported.Load() == 0 {
 		return nil
 	}
@@ -103,6 +117,27 @@ func (o *Object) setXattr(metadata fs.Metadata) (err error) {
 		} else {
 			err = xattr.LSet(o.path, k, v)
 		}
+		if err != nil {
+			if o.fs.xattrIsNotSupported(err) {
+				return nil
+			}
+			return fmt.Errorf("failed to set xattr key %q: %w", k, err)
+		}
+	}
+	return nil
+}
+
+func (o *Object) setXattrWithFD(fd *os.File, metadata fs.Metadata) (err error) {
+	if !xattrSupported || o.fs.xattrSupported.Load() == 0 {
+		return nil
+	}
+	for k, value := range metadata {
+		k = strings.ToLower(k)
+		if _, found := systemMetadataInfo[k]; found {
+			continue
+		}
+		k = xattrPrefix + k
+		err = xattr.FSet(fd, k, []byte(value))
 		if err != nil {
 			if o.fs.xattrIsNotSupported(err) {
 				return nil
