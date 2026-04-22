@@ -200,6 +200,30 @@ jobs:
           make compile_all
         if: matrix.compile_all
 
+      - name: Package release binaries for artifacts
+        run: |
+          if [[ "${{ matrix.os }}" == "ubuntu-latest" ]]; then make release_dep_linux ; fi
+          make ci_beta_build
+        if: github.event_name == 'push' && github.ref == 'refs/heads/master' && github.repository == 'rclone/rclone' && matrix.deploy
+
+      - name: Upload packaged binaries artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: rclone-${{ matrix.job_name }}-binaries
+          path: build/*
+          retention-days: 14
+          if-no-files-found: error
+        if: github.event_name == 'push' && github.ref == 'refs/heads/master' && github.repository == 'rclone/rclone' && matrix.deploy
+
+      - name: Deploy built binaries from packaged build
+        run: |
+          make ci_beta_upload
+        env:
+          RCLONE_CONFIG_PASS: ${{ secrets.RCLONE_CONFIG_PASS }}
+        # working-directory: '$(modulePath)'
+        # Deploy binaries if enabled in config && built from a push to master
+        if: env.RCLONE_CONFIG_PASS != '' && matrix.deploy && github.event_name == 'push' && github.ref == 'refs/heads/master' && github.repository == 'rclone/rclone'
+
       - name: Deploy built binaries
         run: |
           if [[ "${{ matrix.os }}" == "ubuntu-latest" ]]; then make release_dep_linux ; fi
@@ -208,7 +232,7 @@ jobs:
           RCLONE_CONFIG_PASS: ${{ secrets.RCLONE_CONFIG_PASS }}
         # working-directory: '$(modulePath)'
         # Deploy binaries if enabled in config && not a PR && not a fork
-        if: env.RCLONE_CONFIG_PASS != '' && matrix.deploy && github.head_ref == '' && github.repository == 'rclone/rclone'
+        if: env.RCLONE_CONFIG_PASS != '' && matrix.deploy && github.head_ref == '' && github.repository == 'rclone/rclone' && (github.event_name != 'push' || github.ref != 'refs/heads/master')
 
   lint:
     if: inputs.manual || (github.repository == 'rclone/rclone' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name != github.event.pull_request.base.repo.full_name))
