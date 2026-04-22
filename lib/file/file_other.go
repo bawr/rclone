@@ -2,7 +2,11 @@
 
 package file
 
-import "os"
+import (
+	"os"
+
+	"golang.org/x/sys/unix"
+)
 
 // OpenFile is the generalized open call; most users will use Open or Create
 // instead. It opens the named file with specified flag (O_RDONLY etc.) and
@@ -13,6 +17,14 @@ import "os"
 // Under both Unix and Windows this will allow open files to be
 // renamed and or deleted.
 var OpenFile = os.OpenFile
+
+func dup(f *os.File) (*os.File, error) {
+	fd, err := unix.Dup(int(f.Fd()))
+	if err != nil {
+		return nil, err
+	}
+	return os.NewFile(uintptr(fd), f.Name()), nil
+}
 
 // IsReserved checks if path contains a reserved name
 func IsReserved(path string) error {

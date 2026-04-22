@@ -86,7 +86,7 @@ func (o *reOpenTestObject) Open(ctx context.Context, options ...fs.OpenOption) (
 }
 
 func TestReOpen(t *testing.T) {
-	for _, testName := range []string{"Normal", "WithRangeOption", "WithSeekOption", "UnknownSize"} {
+	for _, testName := range []string{"Normal", "WithRangeOption", "WithRangeFromEndOption", "WithSeekOption", "UnknownSize"} {
 		t.Run(testName, func(t *testing.T) {
 			// Contents for the mock object
 			var (
@@ -95,12 +95,16 @@ func TestReOpen(t *testing.T) {
 				rangeOption        *fs.RangeOption
 				seekOption         *fs.SeekOption
 				unknownSize        = false
+				rangeStart         = int64(0)
 			)
 			switch testName {
 			case "Normal":
 			case "WithRangeOption":
 				rangeOption = &fs.RangeOption{Start: 1, End: 7} // range is inclusive
 				expectedRead = reOpenTestcontents[1:8]
+			case "WithRangeFromEndOption":
+				rangeOption = &fs.RangeOption{Start: -1, End: 7}
+				expectedRead = reOpenTestcontents[3:]
 			case "WithSeekOption":
 				seekOption = &fs.SeekOption{Offset: 2}
 				expectedRead = reOpenTestcontents[2:]
@@ -128,7 +132,8 @@ func TestReOpen(t *testing.T) {
 				}
 				if rangeOption != nil {
 					opts = append(opts, rangeOption)
-					src.wantStart = rangeOption.Start
+					rangeStart, _ = rangeOption.Decode(srcOrig.Size())
+					src.wantStart = rangeStart
 				}
 				if seekOption != nil {
 					opts = append(opts, seekOption)
@@ -142,7 +147,7 @@ func TestReOpen(t *testing.T) {
 			setWantStart := func(src *reOpenTestObject, x int64) {
 				src.wantStart = x
 				if rangeOption != nil {
-					src.wantStart += rangeOption.Start
+					src.wantStart += rangeStart
 				} else if seekOption != nil {
 					src.wantStart += seekOption.Offset
 				}

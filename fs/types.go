@@ -182,6 +182,38 @@ type ObjectUnWrapper interface {
 	UnWrap() Object
 }
 
+// TransferOpener is an optional interface for Object.
+type TransferOpener interface {
+	// OpenTransfer opens a transfer-scoped handle which can vend
+	// duplicate readers and hashes without reopening the object path.
+	OpenTransfer(ctx context.Context) (TransferReader, error)
+}
+
+// TransferReader is returned by TransferOpener.
+type TransferReader interface {
+	// Open opens a duplicate reader for the transfer.
+	Open(options ...OpenOption) (io.ReadCloser, error)
+
+	// Hash returns the selected checksum using the transfer handle.
+	Hash(ctx context.Context, ty hash.Type) (string, error)
+
+	// Close releases the transfer handle.
+	Close() error
+}
+
+// TransferHasher is an optional interface for Object.
+type TransferHasher interface {
+	// HashFromTransfer returns a checksum using transfer-retained state.
+	// It returns ok=false if no transfer-retained state is available.
+	HashFromTransfer(ctx context.Context, ty hash.Type) (sum string, ok bool, err error)
+}
+
+// TransferCloser is an optional interface for Object.
+type TransferCloser interface {
+	// CloseTransfer releases any transfer-retained state.
+	CloseTransfer() error
+}
+
 // SetTierer is an optional interface for Object
 type SetTierer interface {
 	// SetTier performs changing storage tier of the Object if
@@ -364,6 +396,12 @@ type Usage struct {
 type WriterAtCloser interface {
 	io.WriterAt
 	io.Closer
+}
+
+// WrittenObjecter is an optional interface for WriterAtCloser.
+type WrittenObjecter interface {
+	// Object returns the object being written.
+	Object() Object
 }
 
 type unknownFs struct{}

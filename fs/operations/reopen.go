@@ -18,26 +18,28 @@ type AccountFn func(n int) error
 
 // ReOpen is a wrapper for an object reader which reopens the stream on error
 type ReOpen struct {
-	ctx         context.Context
-	mu          sync.Mutex      // mutex to protect the below
-	readAtMu    sync.Mutex      // mutex to serialize the ReadAt calls
-	src         fs.Object       // object to open
-	baseOptions []fs.OpenOption // options to pass to initial open and where offset == 0
-	options     []fs.OpenOption // option to pass on subsequent opens where offset != 0
-	rangeOption fs.RangeOption  // adjust this range option on re-opens
-	rc          io.ReadCloser   // underlying stream
-	size        int64           // total size of object - can be -ve
-	start       int64           // absolute position to start reading from
-	end         int64           // absolute position to end reading (exclusive)
-	offset      int64           // offset in the file we are at, offset from start
-	newOffset   int64           // if different to offset, reopen needed
-	maxTries    int             // maximum number of retries
-	tries       int             // number of retries we've had so far in this stream
-	err         error           // if this is set then Read/Close calls will return it
-	opened      bool            // if set then rc is valid and needs closing
-	account     AccountFn       // account for a read
-	reads       int             // count how many times the data has been read
-	accountOn   int             // only account on or after this read
+	ctx           context.Context
+	mu            sync.Mutex // mutex to protect the below
+	readAtMu      sync.Mutex // mutex to serialize the ReadAt calls
+	src           fs.Object  // object to open
+	transfer      fs.TransferReader
+	closeTransfer bool
+	baseOptions   []fs.OpenOption // options to pass to initial open and where offset == 0
+	options       []fs.OpenOption // option to pass on subsequent opens where offset != 0
+	rangeOption   fs.RangeOption  // adjust this range option on re-opens
+	rc            io.ReadCloser   // underlying stream
+	size          int64           // total size of object - can be -ve
+	start         int64           // absolute position to start reading from
+	end           int64           // absolute position to end reading (exclusive)
+	offset        int64           // offset in the file we are at, offset from start
+	newOffset     int64           // if different to offset, reopen needed
+	maxTries      int             // maximum number of retries
+	tries         int             // number of retries we've had so far in this stream
+	err           error           // if this is set then Read/Close calls will return it
+	opened        bool            // if set then rc is valid and needs closing
+	account       AccountFn       // account for a read
+	reads         int             // count how many times the data has been read
+	accountOn     int             // only account on or after this read
 }
 
 var (
@@ -58,15 +60,27 @@ var (
 // If an fs.RangeOption is set then this will applied when reading from
 // the start, and updated on retries.
 func NewReOpen(ctx context.Context, src fs.Object, maxTries int, options ...fs.OpenOption) (rc *ReOpen, err error) {
+	transfer, _, err := openTransfer(ctx, src)
+	if err != nil {
+		return nil, err
+	}
+	return NewReOpenWithTransfer(ctx, src, transfer, transfer != nil, maxTries, options...)
+}
+
+// NewReOpenWithTransfer makes a handle which reuses the supplied transfer
+// handle for reopens.
+func NewReOpenWithTransfer(ctx context.Context, src fs.Object, transfer fs.TransferReader, closeTransfer bool, maxTries int, options ...fs.OpenOption) (rc *ReOpen, err error) {
 	h := &ReOpen{
-		ctx:         ctx,
-		src:         src,
-		maxTries:    maxTries,
-		baseOptions: options,
-		size:        src.Size(),
-		start:       0,
-		offset:      0,
-		newOffset:   -1, // -1 means no seek required
+		ctx:           ctx,
+		src:           src,
+		transfer:      transfer,
+		closeTransfer: closeTransfer,
+		maxTries:      maxTries,
+		baseOptions:   options,
+		size:          src.Size(),
+		start:         0,
+		offset:        0,
+		newOffset:     -1, // -1 means no seek required
 	}
 	h.mu.Lock()
 	defer h.mu.Unlock()
@@ -79,7 +93,7 @@ func NewReOpen(ctx context.Context, src fs.Object, maxTries int, options ...fs.O
 		case *fs.HashesOption:
 			// leave hash option out when ranging
 		case *fs.RangeOption:
-			h.start, limit = x.Decode(h.end)
+			h.start, limit = x.Decode(h.size)
 		case *fs.SeekOption:
 			h.start, limit = x.Offset, -1
 		default:
@@ -102,6 +116,9 @@ func NewReOpen(ctx context.Context, src fs.Object, maxTries int, options ...fs.O
 
 	err = h.open()
 	if err != nil {
+		if h.transfer != nil && h.closeTransfer {
+			_ = h.transfer.Close()
+		}
 		return nil, err
 	}
 	return h, nil
@@ -145,7 +162,11 @@ func (h *ReOpen) open() error {
 	if h.tries > h.maxTries {
 		h.err = errTooManyTries
 	} else {
-		h.rc, h.err = h.src.Open(h.ctx, opts...)
+		if h.transfer != nil {
+			h.rc, h.err = h.transfer.Open(opts...)
+		} else {
+			h.rc, h.err = h.src.Open(h.ctx, opts...)
+		}
 	}
 	if h.err != nil {
 		if h.tries > 1 {
@@ -320,7 +341,15 @@ func (h *ReOpen) Close() error {
 	}
 	h.opened = false
 	h.err = errFileClosed
-	return h.rc.Close()
+	err := h.rc.Close()
+	if h.transfer != nil && h.closeTransfer {
+		closeErr := h.transfer.Close()
+		if err == nil {
+			err = closeErr
+		}
+	}
+	h.transfer = nil
+	return err
 }
 
 // SetAccounting should be provided with a function which will be

@@ -91,6 +91,35 @@ func TestOpenFileDelete(t *testing.T) {
 	})
 }
 
+func TestDupFileDelete(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Skipping dup test on windows")
+	}
+
+	dir := t.TempDir()
+	filepath := path.Join(dir, "file1")
+
+	f, err := Create(filepath)
+	require.NoError(t, err)
+	_, err = f.Write([]byte("hello"))
+	require.NoError(t, err)
+	require.NoError(t, f.Sync())
+
+	dup, err := Dup(f)
+	require.NoError(t, err)
+
+	require.NoError(t, os.Remove(filepath))
+
+	buf := make([]byte, 5)
+	n, err := dup.ReadAt(buf, 0)
+	require.NoError(t, err)
+	assert.Equal(t, 5, n)
+	assert.Equal(t, "hello", string(buf))
+
+	require.NoError(t, dup.Close())
+	require.NoError(t, f.Close())
+}
+
 // Smoke test the Open, OpenFile and Create functions
 func TestOpenFileOperations(t *testing.T) {
 	dir := t.TempDir()

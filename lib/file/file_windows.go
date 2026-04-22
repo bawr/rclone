@@ -68,6 +68,10 @@ func OpenFile(path string, mode int, perm os.FileMode) (*os.File, error) {
 	return os.NewFile(uintptr(h), path), nil
 }
 
+func dup(f *os.File) (*os.File, error) {
+	return nil, errors.New("file dup not implemented on windows")
+}
+
 // IsReserved checks if path contains a reserved name
 func IsReserved(path string) error {
 	if path == "" {

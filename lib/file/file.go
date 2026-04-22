@@ -20,3 +20,9 @@ func Open(name string) (*os.File, error) {
 func Create(name string) (*os.File, error) {
 	return OpenFile(name, os.O_RDWR|os.O_CREATE|os.O_TRUNC, 0666)
 }
+
+// Dup duplicates f, returning a new file handle which refers to the
+// same underlying file description.
+func Dup(f *os.File) (*os.File, error) {
+	return dup(f)
+}

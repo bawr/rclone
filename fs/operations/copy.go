@@ -36,6 +36,7 @@ type copy struct {
 	doUpdate      bool                 // whether we are updating an existing file or not
 	hashType      hash.Type            // common hash to use
 	hashOption    *fs.HashesOption     // open option for the common hash
+	srcTransfer   fs.TransferReader    // transfer handle for the source object
 	tr            *accounting.Transfer // accounting for the transfer
 	inplace       bool                 // set if we are updating inplace and not using a partial name
 	remoteForCopy string               // the name used for the transfer, either remote or remote+".partial"
@@ -65,6 +66,73 @@ func (c *copy) removeFailedPartialCopy(ctx context.Context, f fs.Fs, remote stri
 		return
 	}
 	c.removeFailedCopy(ctx, o)
+}
+
+func (c *copy) closeTransfers(objs ...fs.Object) error {
+	var err error
+	if c.srcTransfer != nil {
+		err = c.srcTransfer.Close()
+		c.srcTransfer = nil
+	}
+	seen := map[fs.Object]struct{}{}
+	for _, obj := range objs {
+		if obj == nil {
+			continue
+		}
+		if _, found := seen[obj]; found {
+			continue
+		}
+		seen[obj] = struct{}{}
+		closeErr := closeTransferObject(obj)
+		if err == nil {
+			err = closeErr
+		}
+	}
+	return err
+}
+
+func (c *copy) ensureSrcTransfer(ctx context.Context) error {
+	if c.srcTransfer != nil {
+		return nil
+	}
+	transfer, ok, err := openTransfer(ctx, c.src)
+	if err != nil || !ok {
+		return err
+	}
+	c.srcTransfer = transfer
+	return nil
+}
+
+func (c *copy) hashWithTransfers(ctx context.Context, src fs.Object, dst fs.Object, ht hash.Type) (equal bool, srcSum, dstSum string, err error) {
+	if ht == hash.None {
+		return true, "", "", nil
+	}
+	if c.srcTransfer != nil {
+		srcSum, err = c.srcTransfer.Hash(ctx, ht)
+		if err != nil {
+			return false, "", "", err
+		}
+	} else {
+		srcSum, err = src.Hash(ctx, ht)
+		if err != nil {
+			return false, "", "", err
+		}
+	}
+	if srcSum == "" {
+		return true, srcSum, "", nil
+	}
+	if dstTransferSum, ok, transferErr := transferHash(ctx, dst, ht); ok || transferErr != nil {
+		dstSum, err = dstTransferSum, transferErr
+	} else {
+		dstSum, err = dst.Hash(ctx, ht)
+	}
+	if err != nil {
+		return false, srcSum, dstSum, err
+	}
+	if dstSum == "" {
+		return true, srcSum, dstSum, nil
+	}
+	return srcSum == dstSum, srcSum, dstSum, nil
 }
 
 // TruncateString s to n bytes.
@@ -266,11 +334,19 @@ func (c *copy) manualCopy(ctx context.Context) (actionTaken string, newDst fs.Ob
 	}
 
 	if doMultiThreadCopy(ctx, c.f, c.src) {
+		err = c.ensureSrcTransfer(ctx)
+		if err != nil {
+			return actionTaken, nil, fmt.Errorf("failed to open source transfer handle: %w", err)
+		}
 		return c.multiThreadCopy(ctx, uploadOptions)
 	}
 
 	var in io.ReadCloser
-	in, err = Open(ctx, c.src, downloadOptions...)
+	if err = c.ensureSrcTransfer(ctx); err == nil && c.srcTransfer != nil {
+		in, err = NewReOpenWithTransfer(ctx, c.src, c.srcTransfer, false, c.ci.LowLevelRetries, downloadOptions...)
+	} else if err == nil {
+		in, err = Open(ctx, c.src, downloadOptions...)
+	}
 	if err != nil {
 		return actionTaken, nil, fmt.Errorf("failed to open source object: %w", err)
 	}
@@ -290,8 +366,10 @@ func (c *copy) verify(ctx context.Context, newDst fs.Object) (err error) {
 	}
 	// Verify hashes are the same after transfer - ignoring blank hashes
 	if c.hashType != hash.None {
-		// checkHashes has logs and counts errors
-		equal, _, srcSum, dstSum, _ := checkHashes(ctx, c.src, newDst, c.hashType)
+		equal, srcSum, dstSum, err := c.hashWithTransfers(ctx, c.src, newDst, c.hashType)
+		if err != nil {
+			return err
+		}
 		if !equal {
 			return fmt.Errorf("corrupted on transfer: %v hashes differ src(%s) %q vs dst(%s) %q", c.hashType, c.src.Fs(), srcSum, newDst.Fs(), dstSum)
 		}
@@ -306,6 +384,12 @@ func (c *copy) verify(ctx context.Context, newDst fs.Object) (err error) {
 // be nil.
 func (c *copy) copy(ctx context.Context) (newDst fs.Object, err error) {
 	var actionTaken string
+	defer func() {
+		closeErr := c.closeTransfers(newDst, c.dst)
+		if err == nil {
+			err = closeErr
+		}
+	}()
 	retry := true
 	for tries := 0; retry && tries < c.maxTries; tries++ {
 		// Check we haven't hit any accounting limits

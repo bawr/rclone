@@ -280,6 +280,91 @@ func TestHashOnDelete(t *testing.T) {
 	require.Error(t, err)
 }
 
+func TestTransferHandleOnDelete(t *testing.T) {
+	ctx := context.Background()
+	r := fstest.NewRun(t)
+	const filePath = "file.txt"
+	const contents = "hello world"
+	r.WriteFile(filePath, contents, time.Now())
+
+	obj, err := r.Flocal.NewObject(ctx, filePath)
+	require.NoError(t, err)
+	o := obj.(*Object)
+
+	transfer, err := o.OpenTransfer(ctx)
+	require.NoError(t, err)
+	defer func() {
+		require.NoError(t, transfer.Close())
+	}()
+
+	rc, err := operations.NewReOpenWithTransfer(ctx, o, transfer, false, 3, &fs.HashesOption{Hashes: hash.NewHashSet(hash.MD5)})
+	require.NoError(t, err)
+
+	buf := make([]byte, 5)
+	n, err := rc.Read(buf)
+	require.NoError(t, err)
+	require.Equal(t, 5, n)
+
+	require.NoError(t, os.Remove(filepath.Join(r.LocalName, filePath)))
+
+	rest, err := io.ReadAll(rc)
+	require.NoError(t, err)
+	require.NoError(t, rc.Close())
+	require.Equal(t, contents, string(append(buf[:n], rest...)))
+
+	md5, err := transfer.Hash(ctx, hash.MD5)
+	require.NoError(t, err)
+	assert.Equal(t, "5eb63bbbe01eeed093cb22bb8f5acdc3", md5)
+}
+
+func TestHashAfterDestinationDelete(t *testing.T) {
+	ctx := context.Background()
+	r := fstest.NewRun(t)
+	const filePath = "dest.txt"
+	const contents = "hello world"
+	when := time.Now()
+	f := r.Flocal.(*Fs)
+	o := f.newObject(filePath)
+
+	src := object.NewStaticObjectInfo(filePath, when, int64(len(contents)), true, nil, f)
+	err := o.Update(ctx, bytes.NewBufferString(contents), src, &fs.HashesOption{Hashes: hash.NewHashSet(hash.MD5)})
+	require.NoError(t, err)
+	defer func() {
+		require.NoError(t, o.CloseTransfer())
+	}()
+
+	require.NoError(t, os.Remove(filepath.Join(f.root, filePath)))
+
+	md5, err := o.Hash(ctx, hash.MD5)
+	require.NoError(t, err)
+	assert.Equal(t, "5eb63bbbe01eeed093cb22bb8f5acdc3", md5)
+}
+
+func TestOpenWriterAtHashAfterDelete(t *testing.T) {
+	ctx := context.Background()
+	r := fstest.NewRun(t)
+	const filePath = "writer-at.txt"
+	const contents = "hello world"
+	f := r.Flocal.(*Fs)
+
+	writer, err := f.OpenWriterAt(ctx, filePath, int64(len(contents)))
+	require.NoError(t, err)
+	_, err = writer.WriteAt([]byte(contents), 0)
+	require.NoError(t, err)
+	require.NoError(t, writer.Close())
+
+	obj := writer.(fs.WrittenObjecter).Object().(*Object)
+	defer func() {
+		require.NoError(t, obj.CloseTransfer())
+	}()
+
+	require.NoError(t, os.Remove(filepath.Join(f.root, filePath)))
+
+	md5, err := obj.Hash(ctx, hash.MD5)
+	require.NoError(t, err)
+	assert.Equal(t, "5eb63bbbe01eeed093cb22bb8f5acdc3", md5)
+}
+
 func TestMetadata(t *testing.T) {
 	ctx := context.Background()
 	r := fstest.NewRun(t)

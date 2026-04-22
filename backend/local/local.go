@@ -385,6 +385,8 @@ type Object struct {
 	hashes  map[hash.Type]string // Hashes
 	// these are read only and don't need the mutex held
 	translatedLink bool // Is this object a translated link
+	transferMu     sync.Mutex
+	transferFD     *os.File
 }
 
 // Directory represents a local filesystem directory
@@ -1161,6 +1163,12 @@ func (o *Object) Hash(ctx context.Context, r hash.Type) (string, error) {
 	hashValue, hashFound := o.hashes[r]
 	o.fs.objectMetaMu.RUnlock()
 
+	if changed {
+		if transferHash, ok, err := o.HashFromTransfer(ctx, r); ok || err != nil {
+			return transferHash, err
+		}
+	}
+
 	if changed || !hashFound {
 		var in io.ReadCloser
 
@@ -1277,6 +1285,25 @@ type localOpenFile struct {
 	fd   *os.File          // file object reference
 }
 
+type localTransfer struct {
+	o  *Object
+	fd *os.File
+}
+
+type localWriterAt struct {
+	*os.File
+	o *Object
+}
+
+type readSeekCloser struct {
+	io.ReadSeeker
+	io.Closer
+}
+
+func (lw *localWriterAt) Object() fs.Object {
+	return lw.o
+}
+
 // Read bytes from the object - see io.Reader
 func (file *localOpenFile) Read(p []byte) (n int, err error) {
 	if !file.o.fs.opt.NoCheckUpdated {
@@ -1318,18 +1345,80 @@ func (file *localOpenFile) Close() (err error) {
 	return err
 }
 
-// Returns a ReadCloser() object that contains the contents of a symbolic link
-func (o *Object) openTranslatedLink(offset, limit int64) (lrc io.ReadCloser, err error) {
-	// Read the link and return the destination  it as the contents of the object
-	linkdst, err := os.Readlink(o.path)
-	if err != nil {
-		return nil, err
+func (o *Object) replaceTransferFD(fd *os.File) error {
+	o.transferMu.Lock()
+	oldFD := o.transferFD
+	o.transferFD = fd
+	o.transferMu.Unlock()
+	if oldFD != nil {
+		return oldFD.Close()
 	}
-	return readers.NewLimitedReadCloser(io.NopCloser(strings.NewReader(linkdst[offset:])), limit), nil
+	return nil
 }
 
-// Open an object for read
-func (o *Object) Open(ctx context.Context, options ...fs.OpenOption) (in io.ReadCloser, err error) {
+func (o *Object) dupTransferFD() (*os.File, bool, error) {
+	o.transferMu.Lock()
+	defer o.transferMu.Unlock()
+	if o.transferFD == nil {
+		return nil, false, nil
+	}
+	fd, err := file.Dup(o.transferFD)
+	if err != nil {
+		return nil, true, err
+	}
+	return fd, true, nil
+}
+
+func (o *Object) CloseTransfer() error {
+	return o.replaceTransferFD(nil)
+}
+
+func (o *Object) HashFromTransfer(ctx context.Context, r hash.Type) (string, bool, error) {
+	if r == hash.None {
+		return "", true, nil
+	}
+	o.fs.objectMetaMu.RLock()
+	hashValue, hashFound := o.hashes[r]
+	o.fs.objectMetaMu.RUnlock()
+	if hashFound {
+		return hashValue, true, nil
+	}
+	fd, ok, err := o.dupTransferFD()
+	if !ok || err != nil {
+		return "", ok, err
+	}
+	defer fs.CheckClose(fd, &err)
+	reader := io.NewSectionReader(fd, 0, o.Size())
+	hashes, err := hash.StreamTypes(readers.NewContextReader(ctx, io.NopCloser(reader)), hash.NewHashSet(r))
+	if err != nil {
+		return "", true, fmt.Errorf("hash: failed to read transfer handle: %w", err)
+	}
+	hashValue = hashes[r]
+	o.fs.objectMetaMu.Lock()
+	if o.hashes == nil {
+		o.hashes = hashes
+	} else {
+		o.hashes[r] = hashValue
+	}
+	o.fs.objectMetaMu.Unlock()
+	return hashValue, true, nil
+}
+
+func (o *Object) newReadCloserFromFD(fd *os.File, offset, limit int64) io.ReadCloser {
+	length := o.Size() - offset
+	if limit >= 0 && limit < length {
+		length = limit
+	}
+	if length < 0 {
+		length = 0
+	}
+	return readSeekCloser{
+		ReadSeeker: io.NewSectionReader(fd, offset, length),
+		Closer:     fd,
+	}
+}
+
+func (o *Object) openFD(fd *os.File, options ...fs.OpenOption) (in io.ReadCloser, err error) {
 	var offset, limit int64 = 0, -1
 	var hasher *hash.MultiHasher
 	for _, option := range options {
@@ -1351,22 +1440,104 @@ func (o *Object) Open(ctx context.Context, options ...fs.OpenOption) (in io.Read
 			}
 		}
 	}
+	if limit < 0 && o.fs.opt.NoCheckUpdated {
+		limit = o.size - offset
+	}
+	in = o.newReadCloserFromFD(fd, offset, limit)
+	if offset != 0 || hasher == nil {
+		return in, nil
+	}
+	return &localOpenFile{
+		o:    o,
+		in:   in,
+		hash: hasher,
+		fd:   fd,
+	}, nil
+}
 
+func (o *Object) OpenTransfer(ctx context.Context) (fs.TransferReader, error) {
+	if o.translatedLink {
+		return nil, fs.ErrorNotImplemented
+	}
+	if err := o.lstat(); err != nil {
+		return nil, err
+	}
+	fd, err := file.Open(o.path)
+	if err != nil {
+		return nil, err
+	}
+	return &localTransfer{o: o, fd: fd}, nil
+}
+
+func (lt *localTransfer) Open(options ...fs.OpenOption) (io.ReadCloser, error) {
+	fd, err := file.Dup(lt.fd)
+	if err != nil {
+		return nil, err
+	}
+	return lt.o.openFD(fd, options...)
+}
+
+func (lt *localTransfer) Hash(ctx context.Context, r hash.Type) (string, error) {
+	if r == hash.None {
+		return "", nil
+	}
+	fd, err := file.Dup(lt.fd)
+	if err != nil {
+		return "", err
+	}
+	defer fs.CheckClose(fd, &err)
+	reader := io.NewSectionReader(fd, 0, lt.o.Size())
+	hashes, err := hash.StreamTypes(readers.NewContextReader(ctx, io.NopCloser(reader)), hash.NewHashSet(r))
+	if err != nil {
+		return "", fmt.Errorf("hash: failed to read transfer handle: %w", err)
+	}
+	hashValue := hashes[r]
+	lt.o.fs.objectMetaMu.Lock()
+	if lt.o.hashes == nil {
+		lt.o.hashes = hashes
+	} else {
+		lt.o.hashes[r] = hashValue
+	}
+	lt.o.fs.objectMetaMu.Unlock()
+	return hashValue, nil
+}
+
+func (lt *localTransfer) Close() error {
+	return lt.fd.Close()
+}
+
+// Returns a ReadCloser() object that contains the contents of a symbolic link
+func (o *Object) openTranslatedLink(offset, limit int64) (lrc io.ReadCloser, err error) {
+	// Read the link and return the destination  it as the contents of the object
+	linkdst, err := os.Readlink(o.path)
+	if err != nil {
+		return nil, err
+	}
+	return readers.NewLimitedReadCloser(io.NopCloser(strings.NewReader(linkdst[offset:])), limit), nil
+}
+
+// Open an object for read
+func (o *Object) Open(ctx context.Context, options ...fs.OpenOption) (in io.ReadCloser, err error) {
 	// Update the file info before we start reading
 	err = o.lstat()
 	if err != nil {
 		return nil, err
 	}
 
-	// If not checking updated then limit to current size.  This means if
-	// file is being extended, readers will read a o.Size() bytes rather
-	// than the new size making for a consistent upload.
-	if limit < 0 && o.fs.opt.NoCheckUpdated {
-		limit = o.size
-	}
-
 	// Handle a translated link
 	if o.translatedLink {
+		var offset, limit int64 = 0, -1
+		for _, option := range options {
+			switch x := option.(type) {
+			case *fs.SeekOption:
+				offset = x.Offset
+			case *fs.RangeOption:
+				offset, limit = x.Decode(o.Size())
+			}
+		}
+		if limit < 0 && o.fs.opt.NoCheckUpdated {
+			limit = o.size - offset
+		}
 		return o.openTranslatedLink(offset, limit)
 	}
 
@@ -1374,25 +1545,7 @@ func (o *Object) Open(ctx context.Context, options ...fs.OpenOption) (in io.Read
 	if err != nil {
 		return
 	}
-	wrappedFd := readers.NewLimitedReadCloser(fd, limit)
-	if offset != 0 {
-		// seek the object
-		_, err = fd.Seek(offset, io.SeekStart)
-		// don't attempt to make checksums
-		return wrappedFd, err
-	}
-	if hasher == nil {
-		// no need to wrap since we don't need checksums
-		return wrappedFd, nil
-	}
-	// Update the hashes as we go along
-	in = &localOpenFile{
-		o:    o,
-		in:   wrappedFd,
-		hash: hasher,
-		fd:   fd,
-	}
-	return in, nil
+	return o.openFD(fd, options...)
 }
 
 // mkdirAll makes all the directories needed to store the object
@@ -1414,6 +1567,7 @@ func (nwc nopWriterCloser) Close() error {
 func (o *Object) Update(ctx context.Context, in io.Reader, src fs.ObjectInfo, options ...fs.OpenOption) (err error) {
 	var out io.WriteCloser
 	var hasher *hash.MultiHasher
+	var verifyFD *os.File
 
 	for _, option := range options {
 		switch x := option.(type) {
@@ -1440,13 +1594,13 @@ func (o *Object) Update(ctx context.Context, in io.Reader, src fs.ObjectInfo, op
 	// If it is a translated link, just read in the contents, and
 	// then create a symlink
 	if !o.translatedLink {
-		f, err := file.OpenFile(o.path, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0666)
+		f, err := file.OpenFile(o.path, os.O_RDWR|os.O_CREATE|os.O_TRUNC, 0666)
 		if err != nil {
 			if runtime.GOOS == "windows" && os.IsPermission(err) {
 				// If permission denied on Windows might be trying to update a
 				// hidden file, in which case try opening without CREATE
 				// See: https://stackoverflow.com/questions/13215716/ioerror-errno-13-permission-denied-when-trying-to-open-hidden-file-in-w-mod
-				f, err = file.OpenFile(o.path, os.O_WRONLY|os.O_TRUNC, 0666)
+				f, err = file.OpenFile(o.path, os.O_RDWR|os.O_TRUNC, 0666)
 				if err != nil {
 					return err
 				}
@@ -1464,6 +1618,11 @@ func (o *Object) Update(ctx context.Context, in io.Reader, src fs.ObjectInfo, op
 					return err
 				}
 			}
+		}
+		verifyFD, err = file.Dup(f)
+		if err != nil {
+			_ = f.Close()
+			return err
 		}
 		out = f
 	} else {
@@ -1501,6 +1660,9 @@ func (o *Object) Update(ctx context.Context, in io.Reader, src fs.ObjectInfo, op
 	}
 
 	if err != nil {
+		if verifyFD != nil {
+			_ = verifyFD.Close()
+		}
 		fs.Logf(o, "Removing partially written file on error: %v", err)
 		if removeErr := os.Remove(o.path); removeErr != nil {
 			fs.Errorf(o, "Failed to remove partially written file: %v", removeErr)
@@ -1513,6 +1675,15 @@ func (o *Object) Update(ctx context.Context, in io.Reader, src fs.ObjectInfo, op
 		o.fs.objectMetaMu.Lock()
 		o.hashes = hasher.Sums()
 		o.fs.objectMetaMu.Unlock()
+	}
+	if verifyFD != nil {
+		if _, seekErr := verifyFD.Seek(0, io.SeekStart); seekErr != nil {
+			_ = verifyFD.Close()
+			verifyFD = nil
+		} else if replaceErr := o.replaceTransferFD(verifyFD); replaceErr != nil {
+			_ = verifyFD.Close()
+			return replaceErr
+		}
 	}
 
 	// Set the mtime
@@ -1545,6 +1716,9 @@ var sparseWarning sync.Once
 func (f *Fs) OpenWriterAt(ctx context.Context, remote string, size int64) (fs.WriterAtCloser, error) {
 	// Temporary Object under construction
 	o := f.newObject(remote)
+	o.fs.objectMetaMu.Lock()
+	o.size = size
+	o.fs.objectMetaMu.Unlock()
 
 	err := o.mkdirAll()
 	if err != nil {
@@ -1555,7 +1729,7 @@ func (f *Fs) OpenWriterAt(ctx context.Context, remote string, size int64) (fs.Wr
 		return nil, errors.New("can't open a symlink for random writing")
 	}
 
-	out, err := file.OpenFile(o.path, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0666)
+	out, err := file.OpenFile(o.path, os.O_RDWR|os.O_CREATE|os.O_TRUNC, 0666)
 	if err != nil {
 		return nil, err
 	}
@@ -1577,7 +1751,19 @@ func (f *Fs) OpenWriterAt(ctx context.Context, remote string, size int64) (fs.Wr
 		}
 	}
 
-	return out, nil
+	verifyFD, err := file.Dup(out)
+	if err != nil {
+		_ = out.Close()
+		return nil, err
+	}
+	err = o.replaceTransferFD(verifyFD)
+	if err != nil {
+		_ = verifyFD.Close()
+		_ = out.Close()
+		return nil, err
+	}
+
+	return &localWriterAt{File: out, o: o}, nil
 }
 
 // setMetadata sets the file info from the os.FileInfo passed in
@@ -1757,9 +1943,13 @@ var (
 	_ fs.DirSetModTimer  = &Fs{}
 	_ fs.MkdirMetadataer = &Fs{}
 	_ fs.Object          = &Object{}
+	_ fs.TransferOpener  = &Object{}
+	_ fs.TransferHasher  = &Object{}
+	_ fs.TransferCloser  = &Object{}
 	_ fs.Metadataer      = &Object{}
 	_ fs.SetMetadataer   = &Object{}
 	_ fs.Directory       = &Directory{}
 	_ fs.SetModTimer     = &Directory{}
 	_ fs.SetMetadataer   = &Directory{}
+	_ fs.WrittenObjecter = &localWriterAt{}
 )

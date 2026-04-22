@@ -58,9 +58,26 @@ type multiThreadCopyState struct {
 	partSize    int64
 	size        int64
 	src         fs.Object
+	transfer    fs.TransferReader
 	acc         *accounting.Account
 	numChunks   int
 	noBuffering bool // set to read the input without buffering
+}
+
+type accountingReadSeeker struct {
+	io.ReadSeeker
+	account func(int) error
+}
+
+func (a accountingReadSeeker) Read(p []byte) (n int, err error) {
+	n, err = a.ReadSeeker.Read(p)
+	if n > 0 {
+		accountErr := a.account(n)
+		if err == nil {
+			err = accountErr
+		}
+	}
+	return n, err
 }
 
 // Copy a single chunk into place
@@ -76,7 +93,21 @@ func (mc *multiThreadCopyState) copyChunk(ctx context.Context, chunk int, writer
 
 	fs.Debugf(mc.src, "multi-thread copy: chunk %d/%d (%d-%d) size %v starting", chunk+1, mc.numChunks, start, end, fs.SizeSuffix(size))
 
-	rc, err := Open(ctx, mc.src, &fs.RangeOption{Start: start, End: end - 1})
+	var rc io.ReadCloser
+	var readSeeker io.ReadSeeker
+	if mc.transfer != nil {
+		rc, err = mc.transfer.Open(&fs.RangeOption{Start: start, End: end - 1})
+		if err == nil {
+			readSeeker, _ = rc.(io.ReadSeeker)
+		}
+	} else {
+		var reOpen *ReOpen
+		reOpen, err = NewReOpenWithTransfer(ctx, mc.src, nil, false, fs.GetConfig(ctx).LowLevelRetries, &fs.RangeOption{Start: start, End: end - 1})
+		if err == nil {
+			rc = reOpen
+			readSeeker = reOpen
+		}
+	}
 	if err != nil {
 		return fmt.Errorf("multi-thread copy: failed to open source: %w", err)
 	}
@@ -86,8 +117,15 @@ func (mc *multiThreadCopyState) copyChunk(ctx context.Context, chunk int, writer
 	if mc.noBuffering {
 		// Read directly if we are sure we aren't going to seek
 		// and account with accounting
-		rc.SetAccounting(mc.acc.AccountRead)
-		rs = rc
+		if reOpen, ok := rc.(*ReOpen); ok {
+			reOpen.SetAccounting(mc.acc.AccountRead)
+			rs = reOpen
+		} else {
+			if readSeeker == nil {
+				return fmt.Errorf("multi-thread copy: source stream is not seekable")
+			}
+			rs = accountingReadSeeker{ReadSeeker: readSeeker, account: mc.acc.AccountRead}
+		}
 	} else {
 		// Read the chunk into buffered reader
 		_, err = io.CopyN(rw, rc, size)
@@ -209,6 +247,13 @@ func multiThreadCopy(ctx context.Context, f fs.Fs, remote string, src fs.Object,
 
 	// Make accounting
 	mc.acc = tr.Account(gCtx, nil)
+	mc.transfer, _, err = openTransfer(gCtx, src)
+	if err != nil {
+		return nil, fmt.Errorf("multi-thread copy: failed to open transfer handle: %w", err)
+	}
+	if mc.transfer != nil {
+		defer fs.CheckClose(mc.transfer, &err)
+	}
 
 	fs.Debugf(src, "Starting multi-thread copy with %d chunks of size %v with %v parallel streams", mc.numChunks, fs.SizeSuffix(mc.partSize), concurrency)
 	for chunk := range mc.numChunks {
@@ -247,9 +292,14 @@ func multiThreadCopy(ctx context.Context, f fs.Fs, remote string, src fs.Object,
 	}
 	uploadedOK = true // file is definitely uploaded OK so no need to abort
 
-	obj, err := f.NewObject(ctx, remote)
-	if err != nil {
-		return nil, fmt.Errorf("multi-thread copy: failed to find object after copy: %w", err)
+	var obj fs.Object
+	if writtenObject, ok := chunkWriter.(interface{ Object() fs.Object }); ok {
+		obj = writtenObject.Object()
+	} else {
+		obj, err = f.NewObject(ctx, remote)
+		if err != nil {
+			return nil, fmt.Errorf("multi-thread copy: failed to find object after copy: %w", err)
+		}
 	}
 
 	// OpenWriterAt doesn't set metadata so we need to set it on completion
@@ -300,6 +350,13 @@ type writerAtChunkWriter struct {
 	closed          bool
 }
 
+func (w *writerAtChunkWriter) Object() fs.Object {
+	if writtenObject, ok := w.writerAt.(fs.WrittenObjecter); ok {
+		return writtenObject.Object()
+	}
+	return nil
+}
+
 // WriteChunk writes chunkNumber from reader
 func (w *writerAtChunkWriter) WriteChunk(ctx context.Context, chunkNumber int, reader io.ReadSeeker) (int64, error) {
 	fs.Debugf(w.remote, "writing chunk %v", chunkNumber)
@@ -346,9 +403,12 @@ func (w *writerAtChunkWriter) Abort(ctx context.Context) error {
 	if err != nil {
 		fs.Errorf(w.remote, "multi-thread copy: failed to close file before aborting: %v", err)
 	}
-	obj, err := w.f.NewObject(ctx, w.remote)
-	if err != nil {
-		return fmt.Errorf("multi-thread copy: failed to find temp file when aborting chunk writer: %w", err)
+	obj := w.Object()
+	if obj == nil {
+		obj, err = w.f.NewObject(ctx, w.remote)
+		if err != nil {
+			return fmt.Errorf("multi-thread copy: failed to find temp file when aborting chunk writer: %w", err)
+		}
 	}
 	return obj.Remove(ctx)
 }
