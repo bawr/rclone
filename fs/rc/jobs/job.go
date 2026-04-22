@@ -197,8 +197,11 @@ func (jobs *Jobs) Stats() (running []int64, finished []int64) {
 	defer jobs.mu.RUnlock()
 	running = []int64{}
 	finished = []int64{}
-	for jobID := range jobs.jobs {
-		if jobs.jobs[jobID].Finished {
+	for jobID, job := range jobs.jobs {
+		job.mu.Lock()
+		isFinished := job.Finished
+		job.mu.Unlock()
+		if isFinished {
 			finished = append(finished, jobID)
 		} else {
 			running = append(running, jobID)
